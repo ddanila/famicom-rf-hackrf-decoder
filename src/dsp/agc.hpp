@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace famidec {
 
@@ -10,18 +11,34 @@ namespace famidec {
 // sync tip = -40 IRE, blanking = 0 IRE, white ~ +100 IRE.
 class Agc {
 public:
-    // Bootstrap from raw extrema over an observation window (several dozen
-    // lines) before trusting the levels; refined per line afterwards.
+    // Bootstrap from level percentiles over an observation window (several
+    // dozen lines); refined per line afterwards. Absolute extrema are not
+    // usable on real signals — noise spikes inflate the peak and push the
+    // sync slicer above the actual sync tips.
     static constexpr int kBootstrapSamples = 50000;  // 5 ms at 10 MSPS
 
     void bootstrap(float raw) {
-        peak_ = std::max(peak_, raw);
-        floor_ = std::min(floor_, raw);
-        if (++boot_count_ >= kBootstrapSamples && peak_ > floor_ + 1e-4f) {
-            tip_ = peak_;
+        if ((boot_count_ & 15) == 0) reservoir_.push_back(raw);
+        if (++boot_count_ < kBootstrapSamples) return;
+        // Sync tips occupy the top few percent of samples in time.
+        auto pct = [this](float p) {
+            size_t k = static_cast<size_t>(p * (reservoir_.size() - 1));
+            std::nth_element(reservoir_.begin(), reservoir_.begin() + k,
+                             reservoir_.end());
+            return reservoir_[k];
+        };
+        float lo = pct(0.02f);
+        float hi = pct(0.98f);
+        if (hi > lo + 1e-4f) {
+            tip_ = hi;
             // Full modulation range tip..white spans 140 IRE.
-            blank_ = peak_ - (peak_ - floor_) * (40.0f / 140.0f);
+            blank_ = hi - (hi - lo) * (40.0f / 140.0f);
             seeded_ = true;
+            reservoir_.clear();
+            reservoir_.shrink_to_fit();
+        } else {
+            boot_count_ = 0;  // flat input, keep observing
+            reservoir_.clear();
         }
     }
 
@@ -67,8 +84,7 @@ public:
 private:
     float tip_ = 1.0f;
     float blank_ = 0.7f;
-    float peak_ = 0.0f;
-    float floor_ = 1e9f;
+    std::vector<float> reservoir_;
     int boot_count_ = 0;
     bool seeded_ = false;
 };

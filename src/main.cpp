@@ -269,6 +269,11 @@ int main(int argc, char** argv) {
         int shot = 0;
         Frame last_shown;
         bool have_shown = false;
+        uint64_t prev_frames = 0;
+        auto last_frame_inc = std::chrono::steady_clock::now();
+        int channel = 0;
+        if (cfg.video_carrier_hz == 91.25e6) channel = 1;
+        else if (cfg.video_carrier_hz == 97.25e6) channel = 2;
         while (g_running.load(std::memory_order_relaxed)) {
             KeyAction act = disp.poll();
             if (act == KeyAction::Quit) break;
@@ -301,6 +306,15 @@ int main(int argc, char** argv) {
             st.clipped = src->clipped_samples();
             st.frames = dec.stats().frames.load();
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
+            // V-SYNC considered locked while real frames keep arriving.
+            auto now = std::chrono::steady_clock::now();
+            if (st.frames > prev_frames) {
+                prev_frames = st.frames;
+                last_frame_inc = now;
+            }
+            st.vsync_locked = (now - last_frame_inc) < std::chrono::milliseconds(500);
+            st.freq_mhz = cfg.video_carrier_hz / 1e6;
+            st.channel = channel;
             disp.render(f, st);
         }
     }

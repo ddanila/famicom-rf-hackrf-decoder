@@ -9,13 +9,16 @@
 namespace famidec {
 
 struct OsdStats {
-    bool line_locked = false;
+    bool line_locked = false;   // H-SYNC
+    bool vsync_locked = false;  // V-SYNC (frames advancing)
     float burst_amp = 0.0f;
     float ring_fill = 0.0f;
     uint64_t dropped = 0;
     uint64_t clipped = 0;
     uint64_t frames = 0;
     int lna = 0, vga = 0;
+    double freq_mhz = 0.0;      // video carrier
+    int channel = 0;            // 1/2 for VHF presets, 0 = custom freq
 };
 
 // Key actions the main loop should react to.
