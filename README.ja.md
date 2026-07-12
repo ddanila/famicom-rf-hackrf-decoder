@@ -139,4 +139,6 @@ ctest --test-dir build
 
 ## ライセンス / 免責
 
+MIT License — [LICENSE](LICENSE) を参照。
+
 受信専用ツールです。HackRF One での送信は行いません。

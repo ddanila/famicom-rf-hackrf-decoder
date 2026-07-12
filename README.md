@@ -140,4 +140,6 @@ ctest --test-dir build
 
 ## License / disclaimer
 
+MIT License — see [LICENSE](LICENSE).
+
 Receive-only tool. It never transmits with the HackRF One.
