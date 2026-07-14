@@ -61,9 +61,9 @@ private:
     SDL_Renderer* ren_ = nullptr;
     SDL_Texture* tex_ = nullptr;
     Frame last_frame_;
+    Frame osd_frame_;
     Frame crt_frame_;
     bool have_frame_ = false;
-    bool last_crt_ = false;
 };
 
 }  // namespace famidec
