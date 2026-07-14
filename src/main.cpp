@@ -297,6 +297,7 @@ int main(int argc, char** argv) {
         uint64_t prev_frames = 0;
         auto last_frame_inc = std::chrono::steady_clock::now();
         bool show_help = false;
+        bool crt_mode = false;
         float fps = 0.0f;
         uint64_t fps_base_frames = 0;
         auto fps_base_time = std::chrono::steady_clock::now();
@@ -314,6 +315,20 @@ int main(int argc, char** argv) {
                 if (act == KeyAction::GainVgaDown) hackrf->set_gains(hackrf->lna(), hackrf->vga() - 2);
             }
             if (act == KeyAction::ToggleHelp) show_help = !show_help;
+            if (act == KeyAction::ToggleCrt) crt_mode = !crt_mode;
+            // Arrow-key tuning: left/right 50 kHz, up/down 1 MHz.
+            double tune = 0.0;
+            if (act == KeyAction::FreqUp) tune = 50e3;
+            if (act == KeyAction::FreqDown) tune = -50e3;
+            if (act == KeyAction::FreqUpBig) tune = 1e6;
+            if (act == KeyAction::FreqDownBig) tune = -1e6;
+            if (tune != 0.0 && hackrf) {
+                mcfg.video_carrier_hz += tune;
+                hackrf->set_center_freq(mcfg.center_hz());
+                if (std::abs(mcfg.video_carrier_hz - 91.25e6) < 3e6) channel = 1;
+                else if (std::abs(mcfg.video_carrier_hz - 97.25e6) < 3e6) channel = 2;
+                else channel = 0;
+            }
             if (act == KeyAction::ToggleColor)
                 mcfg.mode = (mcfg.mode == Config::Mode::Color)
                                 ? Config::Mode::Gray
@@ -354,6 +369,7 @@ int main(int argc, char** argv) {
             }
             st.fps = fps;
             st.show_help = show_help;
+            st.crt = crt_mode;
             // Video latency: samples captured since the displayed frame's
             // vsync, plus ~one USB transfer (13 ms) of hardware buffering.
             if (st.vsync_locked) {

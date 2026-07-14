@@ -24,6 +24,7 @@ struct OsdStats {
     float video_latency_ms = 0.0f;  // capture -> displayed frame
     float audio_latency_ms = 0.0f;  // queued audio
     bool show_help = false;
+    bool crt = false;  // CRT (barrel + scanline + vignette) emulation
 };
 
 // Key actions the main loop should react to.
@@ -37,6 +38,11 @@ enum class KeyAction {
     ToggleColor,
     Screenshot,
     ToggleHelp,
+    FreqUp,      // right arrow: +50 kHz
+    FreqDown,    // left arrow: -50 kHz
+    FreqUpBig,   // up arrow: +1 MHz
+    FreqDownBig, // down arrow: -1 MHz
+    ToggleCrt,
 };
 
 class SdlDisplay {
@@ -55,7 +61,9 @@ private:
     SDL_Renderer* ren_ = nullptr;
     SDL_Texture* tex_ = nullptr;
     Frame last_frame_;
+    Frame crt_frame_;
     bool have_frame_ = false;
+    bool last_crt_ = false;
 };
 
 }  // namespace famidec

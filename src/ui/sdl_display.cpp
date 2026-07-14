@@ -1,7 +1,9 @@
 #include "sdl_display.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <vector>
 
 namespace famidec {
 
@@ -56,6 +58,63 @@ const uint8_t* glyph5x7(char c) {
         case '.': return kDot;
         case '-': return kDash;
         default: return kSpace;
+    }
+}
+
+// CRT emulation: barrel distortion + scanlines + vignette, done as a
+// precomputed per-pixel LUT (source index + 8-bit gain) so the per-frame
+// cost is a single indexed copy with a multiply.
+struct CrtLut {
+    struct Entry {
+        int32_t src;   // source pixel index, -1 = outside tube
+        uint16_t gain; // 0..256 brightness
+    };
+    std::vector<Entry> map;
+
+    CrtLut() {
+        map.resize(static_cast<size_t>(Frame::kWidth) * Frame::kHeight);
+        const double cx = Frame::kWidth / 2.0, cy = Frame::kHeight / 2.0;
+        const double k1 = 0.055;  // barrel strength
+        for (int y = 0; y < Frame::kHeight; ++y) {
+            for (int x = 0; x < Frame::kWidth; ++x) {
+                double nx = (x - cx) / cx, ny = (y - cy) / cy;
+                double r2 = nx * nx + ny * ny;
+                double f = 1.0 + k1 * r2;
+                int sx = static_cast<int>(cx + nx * f * cx + 0.5);
+                int sy = static_cast<int>(cy + ny * f * cy + 0.5);
+                Entry& e = map[static_cast<size_t>(y) * Frame::kWidth + x];
+                if (sx < 0 || sx >= Frame::kWidth || sy < 0 ||
+                    sy >= Frame::kHeight) {
+                    e.src = -1;
+                    e.gain = 0;
+                } else {
+                    e.src = sy * Frame::kWidth + sx;
+                    double vig = 1.0 - 0.18 * r2 * r2;    // corner shading
+                    double scan = (sy & 1) ? 0.72 : 1.0;  // scanlines
+                    double g = std::max(0.0, vig * scan);
+                    e.gain = static_cast<uint16_t>(g * 256.0 + 0.5);
+                }
+            }
+        }
+    }
+};
+
+void apply_crt(const Frame& in, Frame& out) {
+    static const CrtLut lut;
+    const uint32_t* src = in.rgba.data();
+    uint32_t* dst = out.rgba.data();
+    const size_t n = lut.map.size();
+    for (size_t i = 0; i < n; ++i) {
+        const CrtLut::Entry& e = lut.map[i];
+        if (e.src < 0) {
+            dst[i] = 0xff000000u;
+            continue;
+        }
+        uint32_t p = src[e.src];
+        uint32_t r = ((p & 0xffu) * e.gain) >> 8;
+        uint32_t g = (((p >> 8) & 0xffu) * e.gain) >> 8;
+        uint32_t b = (((p >> 16) & 0xffu) * e.gain) >> 8;
+        dst[i] = 0xff000000u | (b << 16) | (g << 8) | r;
     }
 }
 
@@ -128,6 +187,16 @@ KeyAction SdlDisplay::poll() {
                     return KeyAction::Screenshot;
                 case SDLK_h:
                     return KeyAction::ToggleHelp;
+                case SDLK_RIGHT:
+                    return KeyAction::FreqUp;
+                case SDLK_LEFT:
+                    return KeyAction::FreqDown;
+                case SDLK_UP:
+                    return KeyAction::FreqUpBig;
+                case SDLK_DOWN:
+                    return KeyAction::FreqDownBig;
+                case SDLK_r:
+                    return KeyAction::ToggleCrt;
                 default:
                     break;
             }
@@ -138,11 +207,20 @@ KeyAction SdlDisplay::poll() {
 
 void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
     if (frame) {
-        SDL_UpdateTexture(tex_, nullptr, frame->rgba.data(),
-                          Frame::kWidth * 4);
         last_frame_ = *frame;
         have_frame_ = true;
     }
+    if (have_frame_ && (frame || stats.crt != last_crt_)) {
+        if (stats.crt) {
+            apply_crt(last_frame_, crt_frame_);
+            SDL_UpdateTexture(tex_, nullptr, crt_frame_.rgba.data(),
+                              Frame::kWidth * 4);
+        } else {
+            SDL_UpdateTexture(tex_, nullptr, last_frame_.rgba.data(),
+                              Frame::kWidth * 4);
+        }
+    }
+    last_crt_ = stats.crt;
     SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
     SDL_RenderClear(ren_);
     SDL_RenderCopy(ren_, tex_, nullptr, nullptr);
@@ -180,6 +258,9 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
             "C       COLOR - GRAY",
             "S       SCREENSHOT",
             "H       HELP ON - OFF",
+            "LEFT RIGHT  TUNE 50KHZ",
+            "UP DOWN     TUNE 1MHZ",
+            "R       CRT MODE",
         };
         const int n = static_cast<int>(sizeof(kHelp) / sizeof(kHelp[0]));
         int bw = 23 * kCharW + 32;

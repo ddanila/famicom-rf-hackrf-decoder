@@ -90,6 +90,12 @@ float HackRfSource::ring_fill() const {
            static_cast<float>(ring_.capacity());
 }
 
+bool HackRfSource::set_center_freq(double center_hz) {
+    if (!dev_) return false;
+    return hackrf_set_freq(dev_, static_cast<uint64_t>(center_hz)) ==
+           HACKRF_SUCCESS;
+}
+
 bool HackRfSource::set_gains(int lna, int vga) {
     lna_ = std::clamp((lna / 8) * 8, 0, 40);
     vga_ = std::clamp((vga / 2) * 2, 0, 62);
