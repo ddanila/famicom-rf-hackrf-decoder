@@ -30,6 +30,25 @@ the signal (ch1 → 93.25 MHz) and shifts back down in software.
 > it with `--freq`. Envelope detection tolerates a residual offset of
 > ±100 kHz or so.
 
+## Hardware: HackRF One
+
+[HackRF One](https://greatscottgadgets.com/hackrf/one/) (Great Scott
+Gadgets) is an open-source SDR covering 1 MHz–6 GHz with 8-bit IQ sampling
+up to 20 MSPS over USB 2.0. This project uses it receive-only at 10 MSPS.
+
+![hardware setup](docs/hardware-setup.jpg)
+
+Connection: Famicom RF output (75 Ω RCA, the cable that normally goes to
+the TV's antenna terminal) into the HackRF's **ANTENNA** SMA port. A proper
+RCA→SMA adapter is nicer, but as the photo shows, simply joining the
+coax center conductor to the SMA pin works fine — the modulator output is
+strong, so cable losses are a non-issue. Keep the connection wired
+(no over-the-air radiation) and start with AMP off / moderate LNA gain;
+watch the clip warning and adjust with `l`/`g` keys.
+
+The LEDs on the board: 3V3/1V8/RF = power rails, USB = host connected,
+RX flashes while famidec is streaming.
+
 ## Build
 
 ```sh
