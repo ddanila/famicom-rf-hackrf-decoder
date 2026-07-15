@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -125,10 +126,79 @@ void write_ppm(const Frame& f, const std::string& path) {
 
 std::atomic<bool> g_running{true};
 
+// IQ recorder shared between the DSP thread (writer) and the main loop
+// (start/stop via the V key or --record). Writes are 64 KiB blocks, so a
+// plain mutex is cheap enough.
+class Recorder {
+public:
+    bool start(const std::string& path) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (fp_) return false;
+        fp_ = std::fopen(path.c_str(), "wb");
+        if (!fp_) return false;
+        path_ = path;
+        bytes_ = 0;
+        started_ = std::chrono::steady_clock::now();
+        return true;
+    }
+
+    void write(const uint8_t* data, size_t n) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!fp_) return;
+        std::fwrite(data, 1, n, fp_);
+        bytes_ += n;
+    }
+
+    // Returns false if not recording.
+    bool stop(std::string* path, uint64_t* bytes) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!fp_) return false;
+        std::fclose(fp_);
+        fp_ = nullptr;
+        if (path) *path = path_;
+        if (bytes) *bytes = bytes_;
+        return true;
+    }
+
+    bool active() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return fp_ != nullptr;
+    }
+
+    float seconds() {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!fp_) return 0.0f;
+        return std::chrono::duration<float>(std::chrono::steady_clock::now() -
+                                            started_)
+            .count();
+    }
+
+private:
+    std::mutex mu_;
+    std::FILE* fp_ = nullptr;
+    std::string path_;
+    uint64_t bytes_ = 0;
+    std::chrono::steady_clock::time_point started_;
+};
+
+std::string next_recording_path() {
+    for (int i = 1; i < 1000; ++i) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "famidec_rec_%03d.cs8", i);
+        std::FILE* f = std::fopen(name, "rb");
+        if (f) {
+            std::fclose(f);
+            continue;
+        }
+        return name;
+    }
+    return "famidec_rec_overflow.cs8";
+}
+
 // cs8 IQ bytes -> complex -> DC block -> mix carrier to 0 Hz -> channel LPF
 // -> AM detect -> NtscDecoder.
 void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
-                std::FILE* record_fp, FmAudioDemod* fm, SdlAudioOut* aout) {
+                Recorder* rec, FmAudioDemod* fm, SdlAudioOut* aout) {
     constexpr size_t kBlockBytes = 1 << 16;  // 32768 complex samples
     std::vector<uint8_t> raw(kBlockBytes);
     std::vector<std::complex<float>> iq(kBlockBytes / 2);
@@ -149,7 +219,7 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
     while (g_running.load(std::memory_order_relaxed)) {
         size_t n = src->read(raw.data(), raw.size());
         if (n == 0) break;
-        if (record_fp) std::fwrite(raw.data(), 1, n, record_fp);
+        rec->write(raw.data(), n);
         size_t ns = n / 2;
         for (size_t i = 0; i < ns; ++i) {
             std::complex<float> c(
@@ -231,13 +301,10 @@ int main(int argc, char** argv) {
         return rc;
     }
 
-    std::FILE* record_fp = nullptr;
-    if (!cfg.record_path.empty()) {
-        record_fp = std::fopen(cfg.record_path.c_str(), "wb");
-        if (!record_fp) {
-            std::fprintf(stderr, "cannot open %s\n", cfg.record_path.c_str());
-            return 1;
-        }
+    Recorder rec;
+    if (!cfg.record_path.empty() && !rec.start(cfg.record_path)) {
+        std::fprintf(stderr, "cannot open %s\n", cfg.record_path.c_str());
+        return 1;
     }
 
     TripleBuffer tb;
@@ -254,7 +321,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "audio device unavailable, continuing muted\n");
     }
 
-    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, record_fp,
+    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec,
                     fm.get(), aout.ok() ? &aout : nullptr);
 
     int rc = 0;
@@ -317,6 +384,18 @@ int main(int argc, char** argv) {
                 if (act == KeyAction::GainVgaDown) hackrf->set_gains(hackrf->lna(), hackrf->vga() - 2);
             }
             if (act == KeyAction::ToggleHelp) show_help = !show_help;
+            if (act == KeyAction::ToggleRecord) {
+                std::string p;
+                uint64_t b;
+                if (rec.stop(&p, &b))
+                    std::printf(
+                        "saved %s (%.1f MB) - replay: famidec --input file "
+                        "--file %s\n",
+                        p.c_str(), b / 1e6, p.c_str());
+                else if (rec.start(next_recording_path()))
+                    std::printf("recording IQ...\n");
+                std::fflush(stdout);
+            }
             if (act == KeyAction::ToggleCrt) crt_mode = !crt_mode;
             // Arrow-key tuning: left/right 50 kHz, up/down 1 MHz.
             double tune = 0.0;
@@ -372,6 +451,8 @@ int main(int argc, char** argv) {
             st.fps = fps;
             st.show_help = show_help;
             st.crt = crt_mode;
+            st.recording = rec.active();
+            st.rec_seconds = rec.seconds();
             // Video latency: decoder samples since the displayed frame's
             // vsync (same coordinate system, so input drops don't skew it),
             // plus the source's unread backlog and ~one USB transfer (13 ms).
@@ -396,6 +477,10 @@ int main(int argc, char** argv) {
     g_running.store(false, std::memory_order_relaxed);
     src->stop();
     dsp.join();
-    if (record_fp) std::fclose(record_fp);
+    std::string rec_path;
+    uint64_t rec_bytes = 0;
+    if (rec.stop(&rec_path, &rec_bytes))
+        std::printf("saved %s (%.1f MB) - replay: famidec --input file --file %s\n",
+                    rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
     return rc;
 }

@@ -223,6 +223,8 @@ KeyAction SdlDisplay::poll() {
                     return KeyAction::FreqDownBig;
                 case SDLK_r:
                     return KeyAction::ToggleCrt;
+                case SDLK_v:
+                    return KeyAction::ToggleRecord;
                 default:
                     break;
             }
@@ -244,6 +246,12 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
             char ch[8];
             std::snprintf(ch, sizeof(ch), "CH%d", stats.channel);
             frame_text(osd_frame_, 48, 40, ch, 40, 255, 80, 6);
+        }
+        if (stats.recording) {
+            char recl[16];
+            int s = static_cast<int>(stats.rec_seconds);
+            std::snprintf(recl, sizeof(recl), "REC %d:%02d", s / 60, s % 60);
+            frame_text(osd_frame_, 48, 96, recl, 255, 60, 60, 3);
         }
         char l1[48], l2[48], l3[48];
         std::snprintf(l1, sizeof(l1), "V-SYNC:%s H-SYNC:%s %.1fFPS",
@@ -290,6 +298,7 @@ void SdlDisplay::render(const Frame* frame, const OsdStats& stats) {
             "LEFT RIGHT  TUNE 50KHZ",
             "UP DOWN     TUNE 1MHZ",
             "R       CRT MODE",
+            "V       RECORD IQ START-STOP",
         };
         const int n = static_cast<int>(sizeof(kHelp) / sizeof(kHelp[0]));
         int bw = 23 * kCharW + 32;

@@ -25,6 +25,8 @@ struct OsdStats {
     float audio_latency_ms = 0.0f;  // queued audio
     bool show_help = false;
     bool crt = false;  // CRT (barrel + scanline + vignette) emulation
+    bool recording = false;
+    float rec_seconds = 0.0f;
 };
 
 // Key actions the main loop should react to.
@@ -43,6 +45,7 @@ enum class KeyAction {
     FreqUpBig,   // up arrow: +1 MHz
     FreqDownBig, // down arrow: -1 MHz
     ToggleCrt,
+    ToggleRecord,
 };
 
 class SdlDisplay {

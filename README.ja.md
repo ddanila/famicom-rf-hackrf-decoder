@@ -104,6 +104,10 @@ cmake --build build -j
 
 - `q` / ESC: 終了、`l` / `L`: LNA ±8dB、`g` / `G`: VGA ±2dB、
   `c`: カラー⇔白黒、`s`: スクリーンショット (BMP)、`h`: ヘルプ表示
+- `v`: IQ 録画の開始/停止（`famidec_rec_NNN.cs8` に連番保存、録画中は
+  赤い `REC` カウンタ表示）。再生は
+  `famidec --input file --file famidec_rec_001.cs8 --loop`。
+  生 IQ は 10 MSPS で約 20 MB/s（約 72 GB/時）なので短めの録画推奨
 - `←` / `→`: 周波数 ±50 kHz、`↑` / `↓`: ±1 MHz（受信中にリアルタイム
   チューニング）
 - `r`: CRT 再現モード（ブラウン管風の湾曲 + 走査線 + 四隅減光）

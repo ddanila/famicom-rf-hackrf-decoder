@@ -104,6 +104,10 @@ platform-specific dependencies beyond libhackrf and SDL2.
 
 - `q` / ESC: quit, `l` / `L`: LNA ±8 dB, `g` / `G`: VGA ±2 dB,
   `c`: color/gray toggle, `s`: screenshot (BMP), `h`: help overlay
+- `v`: start/stop IQ recording to `famidec_rec_NNN.cs8` (a red `REC`
+  counter shows while recording); replay later with
+  `famidec --input file --file famidec_rec_001.cs8 --loop`.
+  Raw IQ at 10 MSPS is ~20 MB/s (~72 GB/hour) — record short clips
 - `←` / `→`: tune ±50 kHz, `↑` / `↓`: tune ±1 MHz (live retuning)
 - `r`: CRT emulation (barrel distortion + scanlines + vignette)
 - **Top left (big green)**: retro-TV style channel number (`CH1`)
