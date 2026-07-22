@@ -22,6 +22,9 @@ NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
       chroma_bpf_(design_bandpass(kFsc - 1.0e6, kFsc + 1.0e6, cfg.sample_rate, 41)),
       uv_taps_(design_lowpass(0.6e6, cfg.sample_rate, 31)) {
     pll_.init(nominal_period_);
+    if (cfg.input == Config::Input::BasebandF32 &&
+        cfg.baseband_agc == Config::AgcMode::Fixed)
+        agc_.set_levels(cfg.baseband_sync_level, cfg.baseband_blank_level);
     chroma_delay_ = static_cast<int64_t>(chroma_bpf_.delay());
     uv_delay_ = static_cast<int>((uv_taps_.size() - 1) / 2);
     if (!cfg.dump_composite_path.empty())
@@ -229,7 +232,8 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
 
     // AGC refinement: sync tip over the pulse, blanking from the back porch
     // after the burst (8.2..9.2 us).
-    if (edge_measured && pulse_end_ > pulse_begin_) {
+    if (cfg_.baseband_agc == Config::AgcMode::Auto && edge_measured &&
+        pulse_end_ > pulse_begin_) {
         // Average over the middle half of the slicer-asserted pulse extent.
         // Fixed offsets from the edge estimate drift onto the filter-ringing
         // overshoot as AGC scale errors bias the threshold crossing, which

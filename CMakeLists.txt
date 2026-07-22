@@ -29,3 +29,7 @@ enable_testing()
 add_executable(synth_ntsc tests/synth_ntsc.cpp)
 target_link_libraries(synth_ntsc PRIVATE fam_dsp)
 add_test(NAME synth_ntsc COMMAND synth_ntsc)
+
+add_executable(baseband_source_test tests/baseband_source_test.cpp)
+target_include_directories(baseband_source_test PRIVATE src)
+add_test(NAME baseband_source COMMAND baseband_source_test)

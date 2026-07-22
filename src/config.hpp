@@ -13,10 +13,21 @@ struct Config {
     int vga_gain = 20;         // 0-62, step 2
     bool amp = false;
 
-    enum class Input { HackRF, File };
+    enum class Input { HackRF, File, BasebandF32 };
     Input input = Input::HackRF;
     std::string file_path;
     bool loop = false;
+
+    // Raw detected-composite input. Samples are little-endian IEEE-754 f32;
+    // transforms are applied before AGC and decoding.
+    float baseband_gain = 1.0f;
+    float baseband_offset = 0.0f;
+    bool baseband_invert = false;
+
+    enum class AgcMode { Auto, Fixed };
+    AgcMode baseband_agc = AgcMode::Auto;
+    float baseband_sync_level = 1.0f;
+    float baseband_blank_level = 0.0f;
 
     enum class Mode { Color, Gray };
     Mode mode = Mode::Color;

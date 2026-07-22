@@ -17,6 +17,17 @@ public:
     // sync slicer above the actual sync tips.
     static constexpr int kBootstrapSamples = 50000;  // 5 ms at 10 MSPS
 
+    // Seed a known post-transform input mapping. The caller validates that
+    // sync is above blank, matching the decoder's negative-modulation raw
+    // convention.
+    void set_levels(float tip, float blank) {
+        tip_ = tip;
+        blank_ = blank;
+        reservoir_.clear();
+        boot_count_ = 0;
+        seeded_ = tip > blank;
+    }
+
     void bootstrap(float raw) {
         if ((boot_count_ & 15) == 0) reservoir_.push_back(raw);
         if (++boot_count_ < kBootstrapSamples) return;
