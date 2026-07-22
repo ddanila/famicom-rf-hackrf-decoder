@@ -16,7 +16,7 @@ NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
     : cfg_(cfg),
       tb_(out),
       fs_(cfg.sample_rate),
-      nominal_period_(cfg.sample_rate / kLineRate),
+      nominal_period_(cfg.sample_rate / cfg.timing.nominal_line_rate_hz),
       omega_sc_(2.0 * M_PI * kFsc / cfg.sample_rate),
       samples_per_us_(static_cast<int>(cfg.sample_rate / 1e6)),
       chroma_bpf_(design_bandpass(kFsc - 1.0e6, kFsc + 1.0e6, cfg.sample_rate, 41)),
@@ -80,15 +80,22 @@ void NtscDecoder::process(const float* raw, size_t n) {
 bool NtscDecoder::find_hsync_edge(double lo, double hi, double* edge_out,
                                   int64_t* pulse_begin, int64_t* pulse_end) const {
     int64_t start = std::max(static_cast<int64_t>(lo), base_ + 1);
-    int64_t end = std::min(static_cast<int64_t>(hi), comp_end() - 8 * samples_per_us_);
+    int64_t scan_limit = static_cast<int64_t>(
+        cfg_.timing.hsync_scan_limit_us * samples_per_us_);
+    int64_t end = std::min(static_cast<int64_t>(hi),
+                           comp_end() - scan_limit - samples_per_us_);
     for (int64_t j = start; j < end; ++j) {
         if (ire(j - 1) >= kSyncSliceIre && ire(j) < kSyncSliceIre) {
-            // pulse width check: hsync is ~4.7 us
+            // Reject pulses outside the profile's acquisition bounds.
             int64_t k = j;
-            int64_t maxw = j + 7 * samples_per_us_;
+            int64_t maxw = j + scan_limit;
             while (k < maxw && ire(k) < kSyncSliceIre) ++k;
             int64_t w = k - j;
-            if (w < 3 * samples_per_us_ || w > 6 * samples_per_us_) continue;
+            if (w < static_cast<int64_t>(cfg_.timing.hsync_min_us *
+                                         samples_per_us_) ||
+                w > static_cast<int64_t>(cfg_.timing.hsync_max_us *
+                                         samples_per_us_))
+                continue;
             // sub-sample interpolation of the threshold crossing
             float a = ire(j - 1), b = ire(j);
             double frac = (a - kSyncSliceIre) / (a - b);
@@ -119,7 +126,9 @@ void NtscDecoder::decode_lines() {
                 cursor_ += static_cast<int64_t>(nominal_period_);
                 continue;
             }
-            cursor_ = static_cast<int64_t>(edge) + 30 * samples_per_us_;
+            cursor_ = static_cast<int64_t>(edge) + static_cast<int64_t>(
+                                                        cfg_.timing.acquisition_skip_us *
+                                                        samples_per_us_);
             if (search_prev_edge_ >= 0.0) {
                 double interval = edge - search_prev_edge_;
                 if (std::abs(interval - nominal_period_) <
@@ -138,8 +147,10 @@ void NtscDecoder::decode_lines() {
                 comp_end())
                 return;
             double measured;
-            bool ok = find_hsync_edge(predicted - 2 * samples_per_us_,
-                                      predicted + 2 * samples_per_us_,
+            double track_window =
+                cfg_.timing.tracking_window_us * samples_per_us_;
+            bool ok = find_hsync_edge(predicted - track_window,
+                                      predicted + track_window,
                                       &measured, &pulse_begin_, &pulse_end_);
             double edge = pll_.advance(ok, measured);
             if (!ok) stats_.lines_coasted.fetch_add(1, std::memory_order_relaxed);
@@ -199,16 +210,18 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
     for (int64_t j = e; j < e + period_i; ++j)
         if (ire(j) < kSyncSliceIre) ++asserted;
     bool is_vsync_line =
-        asserted > static_cast<int64_t>(0.45 * static_cast<double>(period_i));
+        asserted > static_cast<int64_t>(cfg_.timing.vsync_asserted_fraction *
+                                        static_cast<double>(period_i));
 
     if (is_vsync_line) {
         ++vsync_run_;
         return;
     }
-    if (vsync_run_ >= 2) {
+    if (vsync_run_ >= cfg_.timing.min_vsync_lines) {
         // The stream may begin inside vertical sync. Do not publish the
         // untouched initial back buffer as a spurious black frame.
-        if (line_no_ >= kActiveStartLine + kActiveLines) {
+        if (line_no_ >=
+            cfg_.timing.active_start_line + cfg_.timing.active_lines) {
             tb_.publish(++frame_seq_);
             stats_.frames.fetch_add(1, std::memory_order_relaxed);
             stats_.frame_sample_pos.store(static_cast<uint64_t>(e),
@@ -222,14 +235,14 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         // frames keep flowing (a real TV does the same). Only while the
         // line PLL is solidly locked — otherwise a fake noise-lock would
         // publish black frames instead of falling back to snow.
-        if (line_no_ >= 262) {
+        if (line_no_ >= cfg_.timing.lines_per_frame) {
             if (pll_.locked) {
                 tb_.publish(++frame_seq_);
                 stats_.frames.fetch_add(1, std::memory_order_relaxed);
                 stats_.frame_sample_pos.store(static_cast<uint64_t>(e),
                                               std::memory_order_relaxed);
             }
-            line_no_ -= 262;
+            line_no_ -= cfg_.timing.lines_per_frame;
         }
     }
     vsync_run_ = 0;
@@ -250,28 +263,36 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         tip /= static_cast<float>(tn);
         float blank = 0.0f;
         int n = 0;
-        for (int64_t j = e + 82 * samples_per_us_ / 10;
-             j < e + 92 * samples_per_us_ / 10; ++j, ++n)
+        int64_t blank_begin = e + static_cast<int64_t>(
+                                      cfg_.timing.agc_back_porch_start_us *
+                                      samples_per_us_);
+        int64_t blank_end = e + static_cast<int64_t>(
+                                    cfg_.timing.agc_back_porch_end_us *
+                                    samples_per_us_);
+        for (int64_t j = blank_begin; j < blank_end; ++j, ++n)
             blank += ire(j);
         blank /= static_cast<float>(n);
         agc_.update_from_ire(tip, blank);
     }
 
-    if (line_no_ >= kActiveStartLine &&
-        line_no_ < kActiveStartLine + kActiveLines) {
+    if (line_no_ >= cfg_.timing.active_start_line &&
+        line_no_ <
+            cfg_.timing.active_start_line + cfg_.timing.active_lines) {
         decode_row(edge);
     }
 }
 
 void NtscDecoder::decode_row(double edge) {
     Frame& f = tb_.back();
-    int row = (line_no_ - kActiveStartLine) * 2;
+    int row = (line_no_ - cfg_.timing.active_start_line) * 2;
     if (row < 0 || row + 1 >= Frame::kHeight) return;
     uint32_t* out0 = f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
     uint32_t* out1 = out0 + Frame::kWidth;
 
-    const double full_start = edge + 9.4 * samples_per_us_;
-    const double full_span = 52.6 * samples_per_us_;
+    const double full_start =
+        edge + cfg_.timing.active_start_us * samples_per_us_;
+    const double full_span =
+        cfg_.timing.active_width_us * samples_per_us_;
     // TV-style overscan: display only the central part of the active line.
     const double crop = full_span * cfg_.overscan;
     const double active_start = full_start + crop;

@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "dsp/video_timing.hpp"
+
 namespace famidec {
 
 struct Config {
@@ -41,6 +43,8 @@ struct Config {
     bool headless = false;            // decode without SDL window (dump frames)
     std::string dump_frames_prefix;   // write decoded frames as PPM
     int dump_frame_count = 0;
+
+    VideoTimingProfile timing;
 
     // Color trims
     float saturation = 1.0f;

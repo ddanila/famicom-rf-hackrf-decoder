@@ -17,9 +17,6 @@ namespace famidec {
 class NtscDecoder {
 public:
     static constexpr double kFsc = 315e6 / 88.0;      // 3.579545... MHz
-    static constexpr double kLineRate = 15734.264;    // Hz (NTSC nominal)
-    static constexpr int kActiveLines = 240;
-    static constexpr int kActiveStartLine = 13;       // lines after vsync end
 
     struct Stats {
         std::atomic<bool> line_locked{false};
