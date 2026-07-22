@@ -14,6 +14,22 @@ Synthetic color-bar golden test output:
 
 ![color bars](docs/colorbars.png)
 
+## Fork provenance and Juku scope
+
+This repository is the [`ddanila/famicom-rf-hackrf-decoder`](https://github.com/ddanila/famicom-rf-hackrf-decoder)
+fork of [`GOROman/famicom-rf-hackrf-decoder`](https://github.com/GOROman/famicom-rf-hackrf-decoder).
+The recorded fork point is commit
+[`6cce72d4a0e35ed364d086470191d61e3f6cd116`](https://github.com/GOROman/famicom-rf-hackrf-decoder/commit/6cce72d4a0e35ed364d086470191d61e3f6cd116);
+fork and upstream `main` were byte-aligned there before Juku work began.
+
+The companion [`8080-cosim`](https://github.com/ddanila/8080-cosim)
+repository owns Juku historical evidence, board timing, analog component
+values, X7 waveform fixtures, and acceptance results. This decoder owns only
+generic sample ingestion, receiver DSP, synchronization, and display code.
+Do not introduce guessed Juku timing constants here: every future Juku profile
+must link its initial bounds to evidence in `8080-cosim` and must still report
+the timing measured from input samples.
+
 ## Supported channels
 
 | Channel | Video carrier | Audio carrier (FM) |
@@ -162,6 +178,26 @@ headroom at 10 MSPS on Apple Silicon.
 ./build/synth_ntsc bars.cs8   # write synthetic IQ as .cs8 (for E2E tests)
 ctest --test-dir build
 ```
+
+Linux CI installs the HackRF and SDL2 development libraries, builds the full
+RF/IQ application and every test target, runs CTest, and invokes the synthetic
+NTSC regression directly. Future baseband tests added to CTest therefore join
+the same required path without weakening the existing RF/IQ build.
+
+### Deterministic fixture policy
+
+- Prefer fixtures generated during the test from small, reviewable timing and
+  level parameters. Keep the generator independent of the decoder under test.
+- A committed binary fixture must be short and deterministic, with sample
+  format, endianness, sample rate, scale/offset, source repository and commit,
+  generating command, classification, load impedance when electrical, and a
+  SHA-256 digest recorded beside it.
+- Receiver tests consume raw samples only. Row, column, sync, active-window,
+  and framebuffer truth may be independent test oracles, but must never be
+  hidden metadata inputs to the decoder.
+- Do not commit long RF captures or multi-gigabyte sample files. Preserve a
+  generation recipe or a short redistributable excerpt; for restricted
+  physical captures, preserve hashes and derived measurements instead.
 
 ## Troubleshooting
 
