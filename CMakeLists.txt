@@ -33,3 +33,14 @@ add_test(NAME synth_ntsc COMMAND synth_ntsc)
 add_executable(baseband_source_test tests/baseband_source_test.cpp)
 target_include_directories(baseband_source_test PRIVATE src)
 add_test(NAME baseband_source COMMAND baseband_source_test)
+
+add_executable(baseband_fixture tests/baseband_fixture.cpp)
+add_test(
+    NAME baseband_e2e
+    COMMAND ${CMAKE_COMMAND}
+        "-DFAMIDEC=$<TARGET_FILE:famidec>"
+        "-DFIXTURE_TOOL=$<TARGET_FILE:baseband_fixture>"
+        "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/baseband-e2e"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/baseband_e2e.cmake"
+)
+set_tests_properties(baseband_e2e PROPERTIES TIMEOUT 60)
