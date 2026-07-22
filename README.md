@@ -112,6 +112,30 @@ The default `--agc auto` estimates sync and blanking. For a known waveform,
 requires `S > B`. Input transforms are applied in this order: optional
 polarity inversion, `--baseband-gain`, then `--baseband-offset`.
 
+Custom monochrome timing is explicit and intentionally has no built-in Juku
+preset. `--timing custom` is accepted only with `baseband-f32 --mode gray` and
+requires every timing field shown by `--help`; inconsistent pulse, porch,
+active-window, or frame bounds are rejected. For example, the independent
+non-NTSC regression uses 8 MS/s, 12.5 kHz lines, and 200-line frames:
+
+```sh
+./build/famidec --input baseband-f32 --file custom.f32 --rate 8e6 --mode gray \
+  --agc fixed --sync-level 1 --blank-level 0.75 --timing custom \
+  --line-rate 12500 --hsync-min-us 5 --hsync-max-us 7 --hsync-scan-us 8 \
+  --acquisition-skip-us 40 --tracking-window-us 3 \
+  --vsync-fraction 0.6 --vsync-min-lines 3 --lines-per-frame 200 \
+  --active-start-line 10 --active-lines 180 \
+  --active-start-us 12 --active-width-us 60 \
+  --agc-porch-start-us 8 --agc-porch-end-us 10 \
+  --dump-frames out_ --frames 1 --stats-json lock.json
+```
+
+The JSON report records independent horizontal and frame-lock states, measured
+line/frame rates, sync width, blanking level, video range, decoded/coasted
+line counts, and frame count. A custom headless decode returns failure unless
+it achieves broad-pulse frame lock; flywheel output is not reported as a
+successful capture.
+
 ### Options
 
 | Option | Description |
@@ -135,6 +159,10 @@ polarity inversion, `--baseband-gain`, then `--baseband-offset`.
 | `--baseband-gain F` / `--baseband-offset F` | baseband affine transform (defaults 1 / 0) |
 | `--agc auto\|fixed` | baseband level estimation (default auto) |
 | `--sync-level F` / `--blank-level F` | fixed post-transform levels; sync must be greater |
+| `--timing ntsc\|custom` | default NTSC policy or fully explicit custom monochrome timing |
+| `--line-rate` / `--hsync-*-us` / `--vsync-*` | custom acquisition and synchronization bounds |
+| `--lines-per-frame` / `--active-*` / `--agc-porch-*-us` | custom frame, active-window, and blank-measurement bounds |
+| `--stats-json PATH` | measured lock, rate, sync, blank, and video-range report |
 | `--spectrum` | print PSD and exit (no video) |
 
 ### Keys / on-screen display
@@ -179,7 +207,8 @@ audio tap (pre-LPF) → −4.5 MHz mix → ÷25 decimating FIR (400 kHz)
   → FM discriminator → 75 µs de-emphasis → ÷8 → 50 kHz → SDL audio
 
 little-endian f32 detected composite
-  → polarity / gain / offset → AGC (auto or fixed) → sync/Y-C/RGB path above
+  → polarity / gain / offset → AGC (auto or fixed)
+  → NTSC color path above, or profile-driven sync → direct monochrome RGB
 ```
 
 The Famicom is not broadcast-compliant (non-interlaced 240p, chroma phase
@@ -208,7 +237,11 @@ RF/IQ application and every test target, runs CTest, and invokes the synthetic
 NTSC regression directly. The `baseband_e2e` CTest generates a temporary
 six-field grayscale waveform independently of the decoder, invokes the real
 CLI, validates five exact output bars, checks invalid CLI combinations, and
-removes the generated f32/PPM files after success.
+removes the generated f32/PPM files after success. A second 12.5 kHz/200-line
+fixture proves the explicit non-NTSC profile and measured JSON telemetry. Five
+negative waveforms separately prove horizontal or frame-lock failure for
+reversed polarity, missing hsync, malformed vsync, clipped sync, and excessive
+period error. The monochrome path does not run the NTSC chroma filters.
 
 ### Deterministic fixture policy
 
