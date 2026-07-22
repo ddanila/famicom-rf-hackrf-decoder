@@ -289,17 +289,22 @@ bool parse_args(int argc, char** argv, Config* cfg) {
     return true;
 }
 
-void write_ppm(const Frame& f, const std::string& path) {
+bool write_ppm(const Frame& f, const std::string& path) {
     std::FILE* fp = std::fopen(path.c_str(), "wb");
-    if (!fp) return;
-    std::fprintf(fp, "P6\n%d %d\n255\n", Frame::kWidth, Frame::kHeight);
+    if (!fp) return false;
+    bool ok = std::fprintf(fp, "P6\n%d %d\n255\n", Frame::kWidth,
+                           Frame::kHeight) > 0;
     for (uint32_t px : f.rgba) {
         uint8_t rgb[3] = {static_cast<uint8_t>(px & 0xff),
                           static_cast<uint8_t>((px >> 8) & 0xff),
                           static_cast<uint8_t>((px >> 16) & 0xff)};
-        std::fwrite(rgb, 1, 3, fp);
+        if (std::fwrite(rgb, 1, 3, fp) != 3) {
+            ok = false;
+            break;
+        }
     }
-    std::fclose(fp);
+    if (std::fclose(fp) != 0) ok = false;
+    return ok;
 }
 
 std::atomic<bool> g_running{true};
@@ -560,7 +565,6 @@ int main(int argc, char** argv) {
         int written = 0;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
         while (written < cfg.dump_frame_count &&
-               g_running.load(std::memory_order_relaxed) &&
                std::chrono::steady_clock::now() < deadline) {
             const Frame* f = tb.acquire();
             if (f && f->seq != last_seq) {
@@ -568,8 +572,16 @@ int main(int argc, char** argv) {
                 char path[512];
                 std::snprintf(path, sizeof(path), "%s%04d.ppm",
                               cfg.dump_frames_prefix.c_str(), written);
-                write_ppm(*f, path);
+                if (!write_ppm(*f, path)) {
+                    std::fprintf(stderr, "cannot write frame %s\n", path);
+                    rc = 1;
+                    break;
+                }
                 ++written;
+            } else if (!g_running.load(std::memory_order_relaxed)) {
+                // The producer has reached EOF. TripleBuffer retains its
+                // freshest publication, so check it once before stopping.
+                break;
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
             }

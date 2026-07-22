@@ -206,10 +206,14 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         return;
     }
     if (vsync_run_ >= 2) {
-        tb_.publish(++frame_seq_);
-        stats_.frames.fetch_add(1, std::memory_order_relaxed);
-        stats_.frame_sample_pos.store(static_cast<uint64_t>(e),
-                                      std::memory_order_relaxed);
+        // The stream may begin inside vertical sync. Do not publish the
+        // untouched initial back buffer as a spurious black frame.
+        if (line_no_ >= kActiveStartLine + kActiveLines) {
+            tb_.publish(++frame_seq_);
+            stats_.frames.fetch_add(1, std::memory_order_relaxed);
+            stats_.frame_sample_pos.store(static_cast<uint64_t>(e),
+                                          std::memory_order_relaxed);
+        }
         line_no_ = 0;
     } else {
         ++line_no_;
