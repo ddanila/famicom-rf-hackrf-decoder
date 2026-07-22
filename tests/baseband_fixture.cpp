@@ -20,6 +20,7 @@ struct FixtureTiming {
     double line_us;
     int lines_per_field;
     int vsync_lines;
+    double vsync_us;
     int active_start_line;
     int active_lines;
     double hsync_us;
@@ -29,10 +30,18 @@ struct FixtureTiming {
 };
 
 constexpr FixtureTiming kNtscTiming = {
-    10e6, 1e6 / 15734.264, 262, 3, 13, 240, 4.7, 9.4, 52.6, 6,
+    10e6, 1e6 / 15734.264, 262, 3, 0.0, 13, 240, 4.7, 9.4, 52.6, 6,
 };
 constexpr FixtureTiming kCustomTiming = {
-    8e6, 80.0, 200, 4, 10, 180, 6.0, 12.0, 60.0, 6,
+    8e6, 80.0, 200, 4, 0.0, 10, 180, 6.0, 12.0, 60.0, 6,
+};
+// Synthetic receiver fixture derived from 8080-cosim commit
+// eb4d6ab6777db3f97306c9111e9c723c97dcf750:
+// exact ekta37 PIT counts give 64 us x 313 lines, 24 us/72-line blanking,
+// 8 us/25-line front porches, 320x241 active geometry, and D56's modeled
+// 5.04 us/223 us sync pulses. It is not a physical X7 voltage waveform.
+constexpr FixtureTiming kJukuSyntheticTiming = {
+    8e6, 64.0, 313, 0, 223.0, 47, 241, 5.04, 16.0, 40.0, 6,
 };
 
 enum class Impairment {
@@ -45,6 +54,12 @@ enum class Impairment {
 
 float composite_ire(const FixtureTiming& timing, Impairment impairment,
                     int line, double us) {
+    double field_us = line * timing.line_us + us;
+    if (timing.vsync_us > 0.0 && field_us < timing.vsync_us) {
+        // D34_SYNC XOR reverses the ordinary horizontal pulse during the D56
+        // vertical one-shot: retain a short blank-level gap at the hsync phase.
+        return us < timing.hsync_us ? 0.0f : -40.0f;
+    }
     if (line < timing.vsync_lines &&
         impairment != Impairment::MalformedVsync)
         return us > timing.line_us - timing.hsync_us ? 0.0f : -40.0f;
@@ -154,13 +169,15 @@ int main(int argc, char** argv) {
     if (argc != 3) {
         std::fprintf(
             stderr,
-            "usage: baseband_fixture generate|generate-custom|generate-*|validate PATH\n");
+            "usage: baseband_fixture generate|generate-custom|generate-juku-synthetic|generate-*|validate PATH\n");
         return 2;
     }
     std::string mode = argv[1];
     if (mode == "generate") return generate(argv[2], kNtscTiming) ? 0 : 1;
     if (mode == "generate-custom")
         return generate(argv[2], kCustomTiming) ? 0 : 1;
+    if (mode == "generate-juku-synthetic")
+        return generate(argv[2], kJukuSyntheticTiming) ? 0 : 1;
     if (mode == "generate-reversed")
         return generate(argv[2], kCustomTiming,
                         Impairment::ReversedPolarity) ? 0 : 1;

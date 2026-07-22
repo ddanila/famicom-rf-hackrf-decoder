@@ -30,6 +30,14 @@ Do not introduce guessed Juku timing constants here: every future Juku profile
 must link its initial bounds to evidence in `8080-cosim` and must still report
 the timing measured from input samples.
 
+The test-only `generate-juku-synthetic` fixture is pinned to `8080-cosim`
+commit `eb4d6ab6777db3f97306c9111e9c723c97dcf750`: exact ROM-programmed PIT
+counts establish 64 us lines, 313-line frames, 24 us/72-line blanking,
+8 us/25-line front porches, and 320x241 active geometry; its guarded D56 model
+supplies 5.04 us/223 us sync pulses. This ideal five-bar fixture is deliberately
+not a built-in receiver preset and does not claim physical D34_SIG, VT2, load
+impedance, or X7 voltage.
+
 ## Supported channels
 
 | Channel | Video carrier | Audio carrier (FM) |
@@ -241,7 +249,10 @@ removes the generated f32/PPM files after success. A second 12.5 kHz/200-line
 fixture proves the explicit non-NTSC profile and measured JSON telemetry. Five
 negative waveforms separately prove horizontal or frame-lock failure for
 reversed polarity, missing hsync, malformed vsync, clipped sync, and excessive
-period error. The monochrome path does not run the NTSC chroma filters.
+period error. A third ideal fixture exercises the evidence-linked synthetic
+Juku raster at 15.625 kHz and 313 lines while remaining explicitly distinct
+from a physical X7 waveform. The monochrome path does not run the NTSC chroma
+filters.
 
 ### Deterministic fixture policy
 
