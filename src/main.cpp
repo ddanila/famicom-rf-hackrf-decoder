@@ -1,6 +1,9 @@
 #include <atomic>
+#include <bit>
+#include <cerrno>
 #include <chrono>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +21,7 @@
 #include "dsp/frame.hpp"
 #include "dsp/nco.hpp"
 #include "dsp/ntsc_decoder.hpp"
+#include "source/baseband_file_source.hpp"
 #include "source/file_source.hpp"
 #include "source/hackrf_source.hpp"
 #include "source/sample_source.hpp"
@@ -35,8 +39,9 @@ void usage() {
         "usage: famidec [options]\n"
         "  --channel 1|2         Japan VHF channel preset (default 1)\n"
         "  --freq HZ             explicit video carrier frequency\n"
-        "  --input hackrf|file   input source (default hackrf)\n"
-        "  --file PATH           .cs8 recording for --input file\n"
+        "  --input hackrf|file|baseband-f32\n"
+        "                        input source (default hackrf)\n"
+        "  --file PATH           .cs8 IQ or little-endian f32 baseband file\n"
         "  --loop                loop file playback\n"
         "  --rate HZ             sample rate (default 10e6)\n"
         "  --offset HZ           tuning offset above carrier (default 2e6)\n"
@@ -50,13 +55,60 @@ void usage() {
         "  --volume F            audio volume 0..1 (default 0.7)\n"
         "  --record PATH         tee raw IQ to .cs8 while decoding\n"
         "  --dump-composite PATH write post-AGC composite as f32\n"
+        "  --baseband-polarity normal|inverted\n"
+        "  --baseband-gain F     multiply baseband samples (default 1)\n"
+        "  --baseband-offset F   add after polarity/gain (default 0)\n"
+        "  --agc auto|fixed      baseband level mapping (default auto)\n"
+        "  --sync-level F        fixed-AGC sync tip after transforms\n"
+        "  --blank-level F       fixed-AGC blanking after transforms\n"
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
         "\nkeys: q/ESC quit, l/L LNA +/-, g/G VGA +/-, c color toggle, s screenshot\n");
 }
 
+bool finite_double(double value) {
+    uint64_t bits = std::bit_cast<uint64_t>(value);
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
+
+bool finite_float(float value) {
+    uint32_t bits = std::bit_cast<uint32_t>(value);
+    return (bits & 0x7f800000U) != 0x7f800000U;
+}
+
+bool parse_double_value(const char* text, const char* name, double* out) {
+    errno = 0;
+    char* end = nullptr;
+    double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || errno == ERANGE ||
+        !finite_double(value)) {
+        std::fprintf(stderr, "invalid finite number for %s: %s\n", name, text);
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+bool parse_float_value(const char* text, const char* name, float* out) {
+    errno = 0;
+    char* end = nullptr;
+    float value = std::strtof(text, &end);
+    if (end == text || *end != '\0' || errno == ERANGE ||
+        !finite_float(value)) {
+        std::fprintf(stderr, "invalid finite number for %s: %s\n", name, text);
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
 bool parse_args(int argc, char** argv, Config* cfg) {
+    bool input_explicit = false;
+    bool rate_explicit = false;
+    bool baseband_option = false;
+    bool sync_level_explicit = false;
+    bool blank_level_explicit = false;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* name) -> const char* {
@@ -71,33 +123,112 @@ bool parse_args(int argc, char** argv, Config* cfg) {
             if (ch == 1) cfg->video_carrier_hz = 91.25e6;
             else if (ch == 2) cfg->video_carrier_hz = 97.25e6;
             else { std::fprintf(stderr, "channel must be 1 or 2\n"); return false; }
-        } else if (a == "--freq") cfg->video_carrier_hz = std::atof(next("--freq"));
-        else if (a == "--input") {
+        } else if (a == "--freq") {
+            if (!parse_double_value(next("--freq"), "--freq",
+                                    &cfg->video_carrier_hz))
+                return false;
+        } else if (a == "--input") {
             std::string v = next("--input");
             if (v == "hackrf") cfg->input = Config::Input::HackRF;
             else if (v == "file") cfg->input = Config::Input::File;
-            else return false;
-        } else if (a == "--file") { cfg->file_path = next("--file"); cfg->input = Config::Input::File; }
-        else if (a == "--loop") cfg->loop = true;
-        else if (a == "--rate") cfg->sample_rate = std::atof(next("--rate"));
-        else if (a == "--offset") cfg->offset_hz = std::atof(next("--offset"));
-        else if (a == "--lna") cfg->lna_gain = std::atoi(next("--lna"));
+            else if (v == "baseband-f32")
+                cfg->input = Config::Input::BasebandF32;
+            else {
+                std::fprintf(
+                    stderr,
+                    "--input must be hackrf, file, or baseband-f32\n");
+                return false;
+            }
+            input_explicit = true;
+        } else if (a == "--file") {
+            cfg->file_path = next("--file");
+            if (!input_explicit) cfg->input = Config::Input::File;
+        } else if (a == "--loop") cfg->loop = true;
+        else if (a == "--rate") {
+            if (!parse_double_value(next("--rate"), "--rate", &cfg->sample_rate))
+                return false;
+            rate_explicit = true;
+        } else if (a == "--offset") {
+            if (!parse_double_value(next("--offset"), "--offset", &cfg->offset_hz))
+                return false;
+        } else if (a == "--lna") cfg->lna_gain = std::atoi(next("--lna"));
         else if (a == "--vga") cfg->vga_gain = std::atoi(next("--vga"));
         else if (a == "--amp") cfg->amp = true;
         else if (a == "--mode") {
             std::string v = next("--mode");
-            cfg->mode = (v == "gray") ? Config::Mode::Gray : Config::Mode::Color;
+            if (v == "gray") cfg->mode = Config::Mode::Gray;
+            else if (v == "color") cfg->mode = Config::Mode::Color;
+            else {
+                std::fprintf(stderr, "--mode must be color or gray\n");
+                return false;
+            }
         } else if (a == "--detector") {
             std::string v = next("--detector");
-            cfg->detector = (v == "sync") ? Config::Detector::SyncPLL
-                                          : Config::Detector::Envelope;
+            if (v == "sync") cfg->detector = Config::Detector::SyncPLL;
+            else if (v == "envelope") cfg->detector = Config::Detector::Envelope;
+            else {
+                std::fprintf(stderr, "--detector must be envelope or sync\n");
+                return false;
+            }
         } else if (a == "--no-audio") cfg->audio = false;
-        else if (a == "--volume") cfg->volume = std::atof(next("--volume"));
-        else if (a == "--fm-freq") cfg->fm_freq_hz = std::atof(next("--fm-freq"));
-        else if (a == "--overscan") cfg->overscan = std::atof(next("--overscan"));
-        else if (a == "--sat") cfg->saturation = std::atof(next("--sat"));
-        else if (a == "--hue") cfg->hue_deg = std::atof(next("--hue"));
-        else if (a == "--record") cfg->record_path = next("--record");
+        else if (a == "--volume") {
+            if (!parse_float_value(next("--volume"), "--volume", &cfg->volume))
+                return false;
+        } else if (a == "--fm-freq") {
+            if (!parse_double_value(next("--fm-freq"), "--fm-freq",
+                                    &cfg->fm_freq_hz))
+                return false;
+        } else if (a == "--overscan") {
+            if (!parse_float_value(next("--overscan"), "--overscan", &cfg->overscan))
+                return false;
+        } else if (a == "--sat") {
+            if (!parse_float_value(next("--sat"), "--sat", &cfg->saturation))
+                return false;
+        } else if (a == "--hue") {
+            if (!parse_float_value(next("--hue"), "--hue", &cfg->hue_deg))
+                return false;
+        } else if (a == "--baseband-polarity") {
+            std::string v = next("--baseband-polarity");
+            if (v == "normal") cfg->baseband_invert = false;
+            else if (v == "inverted") cfg->baseband_invert = true;
+            else {
+                std::fprintf(stderr,
+                             "--baseband-polarity must be normal or inverted\n");
+                return false;
+            }
+            baseband_option = true;
+        } else if (a == "--baseband-gain") {
+            if (!parse_float_value(next("--baseband-gain"), "--baseband-gain",
+                                   &cfg->baseband_gain))
+                return false;
+            baseband_option = true;
+        } else if (a == "--baseband-offset") {
+            if (!parse_float_value(next("--baseband-offset"), "--baseband-offset",
+                                   &cfg->baseband_offset))
+                return false;
+            baseband_option = true;
+        } else if (a == "--agc") {
+            std::string v = next("--agc");
+            if (v == "auto") cfg->baseband_agc = Config::AgcMode::Auto;
+            else if (v == "fixed") cfg->baseband_agc = Config::AgcMode::Fixed;
+            else {
+                std::fprintf(stderr, "--agc must be auto or fixed\n");
+                return false;
+            }
+            baseband_option = true;
+        } else if (a == "--sync-level") {
+            if (!parse_float_value(next("--sync-level"), "--sync-level",
+                                   &cfg->baseband_sync_level))
+                return false;
+            sync_level_explicit = true;
+            baseband_option = true;
+        } else if (a == "--blank-level") {
+            if (!parse_float_value(next("--blank-level"), "--blank-level",
+                                   &cfg->baseband_blank_level))
+                return false;
+            blank_level_explicit = true;
+            baseband_option = true;
+        } else if (a == "--record") cfg->record_path = next("--record");
         else if (a == "--dump-composite") cfg->dump_composite_path = next("--dump-composite");
         else if (a == "--dump-frames") { cfg->dump_frames_prefix = next("--dump-frames"); cfg->headless = true; }
         else if (a == "--frames") cfg->dump_frame_count = std::atoi(next("--frames"));
@@ -107,6 +238,51 @@ bool parse_args(int argc, char** argv, Config* cfg) {
     }
     if (cfg->input == Config::Input::File && cfg->file_path.empty()) {
         std::fprintf(stderr, "--input file requires --file PATH\n");
+        return false;
+    }
+    if (!(cfg->sample_rate > 0.0)) {
+        std::fprintf(stderr, "--rate must be greater than zero\n");
+        return false;
+    }
+    if (cfg->input == Config::Input::BasebandF32) {
+        if (cfg->file_path.empty()) {
+            std::fprintf(stderr, "--input baseband-f32 requires --file PATH\n");
+            return false;
+        }
+        if (!rate_explicit) {
+            std::fprintf(stderr,
+                         "--input baseband-f32 requires an explicit --rate HZ\n");
+            return false;
+        }
+        if (cfg->spectrum) {
+            std::fprintf(stderr, "--spectrum is only available for IQ input\n");
+            return false;
+        }
+        if (!cfg->record_path.empty()) {
+            std::fprintf(
+                stderr,
+                "--record records IQ and is unavailable for baseband input\n");
+            return false;
+        }
+        if (cfg->baseband_agc == Config::AgcMode::Fixed) {
+            if (!sync_level_explicit || !blank_level_explicit) {
+                std::fprintf(stderr,
+                             "--agc fixed requires --sync-level and --blank-level\n");
+                return false;
+            }
+            if (!(cfg->baseband_sync_level > cfg->baseband_blank_level)) {
+                std::fprintf(stderr,
+                             "fixed AGC requires sync level greater than blank level\n");
+                return false;
+            }
+        } else if (sync_level_explicit || blank_level_explicit) {
+            std::fprintf(
+                stderr,
+                "--sync-level/--blank-level require --agc fixed\n");
+            return false;
+        }
+    } else if (baseband_option) {
+        std::fprintf(stderr, "baseband options require --input baseband-f32\n");
         return false;
     }
     if (cfg->headless && cfg->dump_frame_count <= 0) cfg->dump_frame_count = 30;
@@ -128,6 +304,7 @@ void write_ppm(const Frame& f, const std::string& path) {
 
 std::atomic<bool> g_running{true};
 std::atomic<bool> g_radio{false};  // broadcast FM radio mode (F key)
+std::atomic<bool> g_input_error{false};
 
 // IQ recorder shared between the DSP thread (writer) and the main loop
 // (start/stop via the V key or --record). Writes are 64 KiB blocks, so a
@@ -200,9 +377,9 @@ std::string next_recording_path() {
 
 // cs8 IQ bytes -> complex -> DC block -> mix carrier to 0 Hz -> channel LPF
 // -> AM detect -> NtscDecoder.
-void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
-                Recorder* rec, FmAudioDemod* fm_tv, FmAudioDemod* fm_radio,
-                SdlAudioOut* aout) {
+void iq_dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
+                   Recorder* rec, FmAudioDemod* fm_tv,
+                   FmAudioDemod* fm_radio, SdlAudioOut* aout) {
     constexpr size_t kBlockBytes = 1 << 16;  // 32768 complex samples
     std::vector<uint8_t> raw(kBlockBytes);
     std::vector<std::complex<float>> iq(kBlockBytes / 2);
@@ -249,6 +426,27 @@ void dsp_thread(const Config& cfg, ISampleSource* src, NtscDecoder* dec,
     g_running.store(false, std::memory_order_relaxed);
 }
 
+// Detected-composite input goes straight to the video decoder. In particular,
+// it must not pass through IQ DC blocking, tuning, filtering, AM detection,
+// audio demodulation, or spectrum analysis.
+void baseband_dsp_thread(BasebandFileSource* src, NtscDecoder* dec) {
+    constexpr size_t kBlockSamples = 1 << 15;
+    std::vector<float> samples(kBlockSamples);
+    while (g_running.load(std::memory_order_relaxed)) {
+        size_t n = src->read(samples.data(), samples.size());
+        if (n == 0) {
+            if (!src->error().empty()) {
+                std::fprintf(stderr, "baseband input error: %s\n",
+                             src->error().c_str());
+                g_input_error.store(true, std::memory_order_relaxed);
+            }
+            break;
+        }
+        dec->process(samples.data(), n);
+    }
+    g_running.store(false, std::memory_order_relaxed);
+}
+
 int run_spectrum(const Config& cfg, ISampleSource* src) {
     // Grab ~0.5 s of IQ and print the PSD.
     size_t n_samples = static_cast<size_t>(cfg.sample_rate / 2);
@@ -281,25 +479,39 @@ int main(int argc, char** argv) {
     }
 
     std::unique_ptr<ISampleSource> src;
+    std::unique_ptr<BasebandFileSource> baseband;
     HackRfSource* hackrf = nullptr;
     if (cfg.input == Config::Input::HackRF) {
         auto h = std::make_unique<HackRfSource>(cfg);
         hackrf = h.get();
         src = std::move(h);
-    } else {
+    } else if (cfg.input == Config::Input::File) {
         // Pace file playback only when showing a live window.
         src = std::make_unique<FileSource>(cfg, !cfg.headless && !cfg.spectrum);
+    } else {
+        baseband = std::make_unique<BasebandFileSource>(cfg, !cfg.headless);
     }
-    if (!src->start()) {
+    bool input_started = src ? src->start() : baseband->start();
+    if (!input_started) {
+        std::string detail;
+        if (hackrf) detail = hackrf->error();
+        else if (baseband) detail = baseband->error();
         std::fprintf(stderr, "failed to start input source%s%s\n",
-                     hackrf ? ": " : "",
-                     hackrf ? hackrf->error().c_str() : "");
+                     detail.empty() ? "" : ": ", detail.c_str());
         return 1;
     }
-    std::printf("input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n",
-                cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(),
-                cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6,
-                cfg.sample_rate / 1e6);
+    if (baseband) {
+        std::printf("input: baseband-f32 %s   %.6f MSPS   AGC %s\n",
+                    cfg.file_path.c_str(), cfg.sample_rate / 1e6,
+                    cfg.baseband_agc == Config::AgcMode::Fixed ? "fixed"
+                                                               : "auto");
+    } else {
+        std::printf(
+            "input: %s   video carrier %.3f MHz   center %.3f MHz   %.1f MSPS\n",
+            cfg.input == Config::Input::HackRF ? "HackRF" : cfg.file_path.c_str(),
+            cfg.video_carrier_hz / 1e6, cfg.center_hz() / 1e6,
+            cfg.sample_rate / 1e6);
+    }
 
     if (cfg.spectrum) {
         int rc = run_spectrum(cfg, src.get());
@@ -319,7 +531,7 @@ int main(int argc, char** argv) {
     // FM audio (window mode only): TV intercarrier + broadcast radio demods.
     std::unique_ptr<FmAudioDemod> fm, fm_radio;
     SdlAudioOut aout;
-    if (cfg.audio && !cfg.headless) {
+    if (cfg.audio && !cfg.headless && !baseband) {
         auto tv = std::make_unique<FmAudioDemod>(
             FmAudioDemod::tv(cfg.sample_rate, cfg.volume));
         auto radio = std::make_unique<FmAudioDemod>(
@@ -332,8 +544,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::thread dsp(dsp_thread, std::cref(cfg), src.get(), &dec, &rec,
-                    fm.get(), fm_radio.get(), aout.ok() ? &aout : nullptr);
+    std::thread dsp;
+    if (baseband) {
+        dsp = std::thread(baseband_dsp_thread, baseband.get(), &dec);
+    } else {
+        dsp = std::thread(iq_dsp_thread, std::cref(cfg), src.get(), &dec, &rec,
+                          fm.get(), fm_radio.get(),
+                          aout.ok() ? &aout : nullptr);
+    }
 
     int rc = 0;
     if (cfg.headless) {
@@ -396,7 +614,7 @@ int main(int argc, char** argv) {
                 if (act == KeyAction::GainVgaDown) hackrf->set_gains(hackrf->lna(), hackrf->vga() - 2);
             }
             if (act == KeyAction::ToggleHelp) show_help = !show_help;
-            if (act == KeyAction::ToggleRecord) {
+            if (act == KeyAction::ToggleRecord && src) {
                 std::string p;
                 uint64_t b;
                 if (rec.stop(&p, &b))
@@ -456,9 +674,9 @@ int main(int argc, char** argv) {
             OsdStats st;
             st.line_locked = dec.stats().line_locked.load();
             st.burst_amp = dec.stats().burst_amp.load();
-            st.ring_fill = src->ring_fill();
-            st.dropped = src->dropped_bytes();
-            st.clipped = src->clipped_samples();
+            st.ring_fill = src ? src->ring_fill() : 0.0f;
+            st.dropped = src ? src->dropped_bytes() : 0;
+            st.clipped = src ? src->clipped_samples() : 0;
             st.frames = dec.stats().frames.load();
             if (hackrf) { st.lna = hackrf->lna(); st.vga = hackrf->vga(); }
             // V-SYNC considered locked while real frames keep arriving.
@@ -491,9 +709,10 @@ int main(int argc, char** argv) {
                 if (dsp_samples > vsync_pos)
                     st.video_latency_ms = static_cast<float>(
                         (static_cast<double>(dsp_samples - vsync_pos) +
-                         static_cast<double>(src->buffered_bytes()) / 2.0) /
+                         static_cast<double>(src ? src->buffered_bytes() / 2
+                                                 : baseband->buffered_samples())) /
                             cfg.sample_rate * 1000.0 +
-                        13.0);
+                        (hackrf ? 13.0 : 0.0));
             }
             st.audio_latency_ms = aout.ok() ? aout.queued_ms() : 0.0f;
             st.radio = g_radio.load(std::memory_order_relaxed);
@@ -505,12 +724,21 @@ int main(int argc, char** argv) {
     }
 
     g_running.store(false, std::memory_order_relaxed);
-    src->stop();
-    dsp.join();
+    if (baseband) {
+        // Baseband reads are ordinary FILE operations and return promptly;
+        // never close the stream concurrently with its reader thread.
+        dsp.join();
+        baseband->stop();
+    } else {
+        // Live IQ reads may need source shutdown to unblock them.
+        src->stop();
+        dsp.join();
+    }
     std::string rec_path;
     uint64_t rec_bytes = 0;
     if (rec.stop(&rec_path, &rec_bytes))
         std::printf("saved %s (%.1f MB) - replay: famidec --input file --file %s\n",
                     rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
+    if (g_input_error.load(std::memory_order_relaxed)) rc = 1;
     return rc;
 }
