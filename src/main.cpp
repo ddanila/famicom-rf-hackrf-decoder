@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -61,6 +62,14 @@ void usage() {
         "  --agc auto|fixed      baseband level mapping (default auto)\n"
         "  --sync-level F        fixed-AGC sync tip after transforms\n"
         "  --blank-level F       fixed-AGC blanking after transforms\n"
+        "  --timing ntsc|custom receiver timing policy (default ntsc)\n"
+        "  --line-rate HZ        custom nominal horizontal rate\n"
+        "  --hsync-min-us F --hsync-max-us F --hsync-scan-us F\n"
+        "  --acquisition-skip-us F --tracking-window-us F\n"
+        "  --vsync-fraction F --vsync-min-lines N --lines-per-frame N\n"
+        "  --active-start-line N --active-lines N\n"
+        "  --active-start-us F --active-width-us F\n"
+        "  --agc-porch-start-us F --agc-porch-end-us F\n"
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
         "  --spectrum            print PSD and exit (no video)\n"
@@ -103,12 +112,48 @@ bool parse_float_value(const char* text, const char* name, float* out) {
     return true;
 }
 
+bool parse_int_value(const char* text, const char* name, int* out) {
+    errno = 0;
+    char* end = nullptr;
+    long value = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || errno == ERANGE ||
+        value < std::numeric_limits<int>::min() ||
+        value > std::numeric_limits<int>::max()) {
+        std::fprintf(stderr, "invalid integer for %s: %s\n", name, text);
+        return false;
+    }
+    *out = static_cast<int>(value);
+    return true;
+}
+
+enum TimingField : uint32_t {
+    kLineRateField = 1U << 0,
+    kHsyncMinField = 1U << 1,
+    kHsyncMaxField = 1U << 2,
+    kHsyncScanField = 1U << 3,
+    kAcquisitionSkipField = 1U << 4,
+    kTrackingWindowField = 1U << 5,
+    kVsyncFractionField = 1U << 6,
+    kVsyncMinLinesField = 1U << 7,
+    kLinesPerFrameField = 1U << 8,
+    kActiveStartLineField = 1U << 9,
+    kActiveLinesField = 1U << 10,
+    kActiveStartUsField = 1U << 11,
+    kActiveWidthUsField = 1U << 12,
+    kAgcPorchStartField = 1U << 13,
+    kAgcPorchEndField = 1U << 14,
+};
+constexpr uint32_t kAllTimingFields = (1U << 15) - 1;
+
 bool parse_args(int argc, char** argv, Config* cfg) {
     bool input_explicit = false;
     bool rate_explicit = false;
     bool baseband_option = false;
     bool sync_level_explicit = false;
     bool blank_level_explicit = false;
+    bool custom_timing = false;
+    bool timing_explicit = false;
+    uint32_t timing_fields = 0;
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](const char* name) -> const char* {
@@ -228,6 +273,100 @@ bool parse_args(int argc, char** argv, Config* cfg) {
                 return false;
             blank_level_explicit = true;
             baseband_option = true;
+        } else if (a == "--timing") {
+            std::string v = next("--timing");
+            if (v == "ntsc") custom_timing = false;
+            else if (v == "custom") custom_timing = true;
+            else {
+                std::fprintf(stderr, "--timing must be ntsc or custom\n");
+                return false;
+            }
+            timing_explicit = true;
+        } else if (a == "--line-rate") {
+            if (!parse_double_value(next("--line-rate"), "--line-rate",
+                                    &cfg->timing.nominal_line_rate_hz))
+                return false;
+            timing_fields |= kLineRateField;
+        } else if (a == "--hsync-min-us") {
+            if (!parse_double_value(next("--hsync-min-us"), "--hsync-min-us",
+                                    &cfg->timing.hsync_min_us))
+                return false;
+            timing_fields |= kHsyncMinField;
+        } else if (a == "--hsync-max-us") {
+            if (!parse_double_value(next("--hsync-max-us"), "--hsync-max-us",
+                                    &cfg->timing.hsync_max_us))
+                return false;
+            timing_fields |= kHsyncMaxField;
+        } else if (a == "--hsync-scan-us") {
+            if (!parse_double_value(next("--hsync-scan-us"), "--hsync-scan-us",
+                                    &cfg->timing.hsync_scan_limit_us))
+                return false;
+            timing_fields |= kHsyncScanField;
+        } else if (a == "--acquisition-skip-us") {
+            if (!parse_double_value(next("--acquisition-skip-us"),
+                                    "--acquisition-skip-us",
+                                    &cfg->timing.acquisition_skip_us))
+                return false;
+            timing_fields |= kAcquisitionSkipField;
+        } else if (a == "--tracking-window-us") {
+            if (!parse_double_value(next("--tracking-window-us"),
+                                    "--tracking-window-us",
+                                    &cfg->timing.tracking_window_us))
+                return false;
+            timing_fields |= kTrackingWindowField;
+        } else if (a == "--vsync-fraction") {
+            if (!parse_double_value(next("--vsync-fraction"),
+                                    "--vsync-fraction",
+                                    &cfg->timing.vsync_asserted_fraction))
+                return false;
+            timing_fields |= kVsyncFractionField;
+        } else if (a == "--vsync-min-lines") {
+            if (!parse_int_value(next("--vsync-min-lines"),
+                                 "--vsync-min-lines",
+                                 &cfg->timing.min_vsync_lines))
+                return false;
+            timing_fields |= kVsyncMinLinesField;
+        } else if (a == "--lines-per-frame") {
+            if (!parse_int_value(next("--lines-per-frame"),
+                                 "--lines-per-frame",
+                                 &cfg->timing.lines_per_frame))
+                return false;
+            timing_fields |= kLinesPerFrameField;
+        } else if (a == "--active-start-line") {
+            if (!parse_int_value(next("--active-start-line"),
+                                 "--active-start-line",
+                                 &cfg->timing.active_start_line))
+                return false;
+            timing_fields |= kActiveStartLineField;
+        } else if (a == "--active-lines") {
+            if (!parse_int_value(next("--active-lines"), "--active-lines",
+                                 &cfg->timing.active_lines))
+                return false;
+            timing_fields |= kActiveLinesField;
+        } else if (a == "--active-start-us") {
+            if (!parse_double_value(next("--active-start-us"),
+                                    "--active-start-us",
+                                    &cfg->timing.active_start_us))
+                return false;
+            timing_fields |= kActiveStartUsField;
+        } else if (a == "--active-width-us") {
+            if (!parse_double_value(next("--active-width-us"),
+                                    "--active-width-us",
+                                    &cfg->timing.active_width_us))
+                return false;
+            timing_fields |= kActiveWidthUsField;
+        } else if (a == "--agc-porch-start-us") {
+            if (!parse_double_value(next("--agc-porch-start-us"),
+                                    "--agc-porch-start-us",
+                                    &cfg->timing.agc_back_porch_start_us))
+                return false;
+            timing_fields |= kAgcPorchStartField;
+        } else if (a == "--agc-porch-end-us") {
+            if (!parse_double_value(next("--agc-porch-end-us"),
+                                    "--agc-porch-end-us",
+                                    &cfg->timing.agc_back_porch_end_us))
+                return false;
+            timing_fields |= kAgcPorchEndField;
         } else if (a == "--record") cfg->record_path = next("--record");
         else if (a == "--dump-composite") cfg->dump_composite_path = next("--dump-composite");
         else if (a == "--dump-frames") { cfg->dump_frames_prefix = next("--dump-frames"); cfg->headless = true; }
@@ -284,6 +423,56 @@ bool parse_args(int argc, char** argv, Config* cfg) {
     } else if (baseband_option) {
         std::fprintf(stderr, "baseband options require --input baseband-f32\n");
         return false;
+    }
+    if (timing_fields != 0 && (!timing_explicit || !custom_timing)) {
+        std::fprintf(stderr,
+                     "custom timing fields require --timing custom\n");
+        return false;
+    }
+    if (custom_timing) {
+        if (timing_fields != kAllTimingFields) {
+            std::fprintf(stderr,
+                         "--timing custom requires every documented timing field\n");
+            return false;
+        }
+        if (cfg->input != Config::Input::BasebandF32 ||
+            cfg->mode != Config::Mode::Gray) {
+            std::fprintf(stderr,
+                         "--timing custom requires baseband-f32 and --mode gray\n");
+            return false;
+        }
+        const auto& t = cfg->timing;
+        double line_us = 1e6 / t.nominal_line_rate_hz;
+        bool valid = cfg->sample_rate >= 1e6 && t.nominal_line_rate_hz > 0.0 &&
+                     t.hsync_min_us > 0.0 &&
+                     t.hsync_max_us >= t.hsync_min_us &&
+                     t.hsync_scan_limit_us > t.hsync_max_us &&
+                     t.hsync_scan_limit_us < line_us &&
+                     t.acquisition_skip_us > t.hsync_scan_limit_us &&
+                     t.acquisition_skip_us < line_us &&
+                     t.tracking_window_us > 0.0 &&
+                     t.tracking_window_us < line_us / 2.0 &&
+                     t.vsync_asserted_fraction > 0.0 &&
+                     t.vsync_asserted_fraction < 1.0 &&
+                     t.min_vsync_lines > 0 && t.lines_per_frame > 0 &&
+                     t.min_vsync_lines < t.lines_per_frame &&
+                     t.active_start_line >= 0 && t.active_lines > 0 &&
+                     t.active_lines <= Frame::kHeight &&
+                     static_cast<int64_t>(t.active_start_line) +
+                             t.active_lines <
+                         t.lines_per_frame &&
+                     t.agc_back_porch_start_us >= t.hsync_max_us &&
+                     t.agc_back_porch_end_us >
+                         t.agc_back_porch_start_us &&
+                     t.agc_back_porch_end_us <= t.active_start_us &&
+                     t.active_start_us > t.hsync_max_us &&
+                     t.active_width_us > 0.0 &&
+                     t.active_start_us + t.active_width_us < line_us;
+        if (!valid) {
+            std::fprintf(stderr,
+                         "custom timing values are inconsistent or out of range\n");
+            return false;
+        }
     }
     if (cfg->headless && cfg->dump_frame_count <= 0) cfg->dump_frame_count = 30;
     return true;

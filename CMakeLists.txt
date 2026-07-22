@@ -44,3 +44,13 @@ add_test(
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/baseband_e2e.cmake"
 )
 set_tests_properties(baseband_e2e PROPERTIES TIMEOUT 60)
+
+add_test(
+    NAME non_ntsc_baseband_e2e
+    COMMAND ${CMAKE_COMMAND}
+        "-DFAMIDEC=$<TARGET_FILE:famidec>"
+        "-DFIXTURE_TOOL=$<TARGET_FILE:baseband_fixture>"
+        "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/non-ntsc-baseband-e2e"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/non_ntsc_baseband_e2e.cmake"
+)
+set_tests_properties(non_ntsc_baseband_e2e PROPERTIES TIMEOUT 60)

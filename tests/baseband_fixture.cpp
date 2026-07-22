@@ -12,30 +12,47 @@
 
 namespace {
 
-constexpr double kFs = 10e6;
-constexpr double kLineUs = 1e6 / 15734.264;
-constexpr int kLinesPerField = 262;
-constexpr int kVsyncLines = 3;
-constexpr int kPostVsyncBlank = 13;
-constexpr int kActiveLines = 240;
-constexpr int kFields = 6;
 constexpr std::array<float, 5> kBars = {0.0f, 25.0f, 50.0f, 75.0f,
                                         100.0f};
 
-float composite_ire(int line, double us) {
-    if (line < kVsyncLines)
-        return us > kLineUs - 4.7 ? 0.0f : -40.0f;
-    if (us < 4.7) return -40.0f;
-    if (us < 9.4 || us >= 62.0) return 0.0f;
-    int active_line = line - kVsyncLines - kPostVsyncBlank;
-    if (active_line < 0 || active_line >= kActiveLines) return 0.0f;
-    double frac = (us - 9.4) / 52.6;
+struct FixtureTiming {
+    double sample_rate;
+    double line_us;
+    int lines_per_field;
+    int vsync_lines;
+    int active_start_line;
+    int active_lines;
+    double hsync_us;
+    double active_start_us;
+    double active_width_us;
+    int fields;
+};
+
+constexpr FixtureTiming kNtscTiming = {
+    10e6, 1e6 / 15734.264, 262, 3, 13, 240, 4.7, 9.4, 52.6, 6,
+};
+constexpr FixtureTiming kCustomTiming = {
+    8e6, 80.0, 200, 4, 10, 180, 6.0, 12.0, 60.0, 6,
+};
+
+float composite_ire(const FixtureTiming& timing, int line, double us) {
+    if (line < timing.vsync_lines)
+        return us > timing.line_us - timing.hsync_us ? 0.0f : -40.0f;
+    if (us < timing.hsync_us) return -40.0f;
+    if (us < timing.active_start_us ||
+        us >= timing.active_start_us + timing.active_width_us)
+        return 0.0f;
+    int active_line =
+        line - timing.vsync_lines - timing.active_start_line;
+    if (active_line < 0 || active_line >= timing.active_lines) return 0.0f;
+    double frac =
+        (us - timing.active_start_us) / timing.active_width_us;
     int bar = std::clamp(static_cast<int>(frac * kBars.size()), 0,
                          static_cast<int>(kBars.size()) - 1);
     return kBars[static_cast<size_t>(bar)];
 }
 
-bool generate(const std::string& path) {
+bool generate(const std::string& path, const FixtureTiming& timing) {
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
 
@@ -55,14 +72,18 @@ bool generate(const std::string& path) {
         if (buffered == buffer.size()) flush();
     };
 
-    const double samples_per_line = kFs * kLineUs / 1e6;
-    const double samples_per_field = samples_per_line * kLinesPerField;
-    const uint64_t total = static_cast<uint64_t>(kFields * samples_per_field);
+    const double samples_per_line =
+        timing.sample_rate * timing.line_us / 1e6;
+    const double samples_per_field =
+        samples_per_line * timing.lines_per_field;
+    const uint64_t total =
+        static_cast<uint64_t>(timing.fields * samples_per_field);
     for (uint64_t n = 0; n < total; ++n) {
         double in_field = std::fmod(static_cast<double>(n), samples_per_field);
         int line = static_cast<int>(in_field / samples_per_line);
-        double us = std::fmod(in_field, samples_per_line) / kFs * 1e6;
-        float ire = composite_ire(line, us);
+        double us = std::fmod(in_field, samples_per_line) /
+                    timing.sample_rate * 1e6;
+        float ire = composite_ire(timing, line, us);
         // Negative modulation convention used by NtscDecoder's raw input:
         // sync tip=1.0, blank=0.75, white=0.125.
         append_f32le(0.75f - ire * 0.00625f);
@@ -116,11 +137,15 @@ bool validate(const std::string& path) {
 
 int main(int argc, char** argv) {
     if (argc != 3) {
-        std::fprintf(stderr, "usage: baseband_fixture generate|validate PATH\n");
+        std::fprintf(
+            stderr,
+            "usage: baseband_fixture generate|generate-custom|validate PATH\n");
         return 2;
     }
     std::string mode = argv[1];
-    if (mode == "generate") return generate(argv[2]) ? 0 : 1;
+    if (mode == "generate") return generate(argv[2], kNtscTiming) ? 0 : 1;
+    if (mode == "generate-custom")
+        return generate(argv[2], kCustomTiming) ? 0 : 1;
     if (mode == "validate") return validate(argv[2]) ? 0 : 1;
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;

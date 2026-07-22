@@ -19,8 +19,13 @@ NtscDecoder::NtscDecoder(const Config& cfg, TripleBuffer& out)
       nominal_period_(cfg.sample_rate / cfg.timing.nominal_line_rate_hz),
       omega_sc_(2.0 * M_PI * kFsc / cfg.sample_rate),
       samples_per_us_(static_cast<int>(cfg.sample_rate / 1e6)),
-      chroma_bpf_(design_bandpass(kFsc - 1.0e6, kFsc + 1.0e6, cfg.sample_rate, 41)),
-      uv_taps_(design_lowpass(0.6e6, cfg.sample_rate, 31)) {
+      chroma_bpf_(cfg.mode == Config::Mode::Color
+                      ? design_bandpass(kFsc - 1.0e6, kFsc + 1.0e6,
+                                        cfg.sample_rate, 41)
+                      : std::vector<float>{1.0f}),
+      uv_taps_(cfg.mode == Config::Mode::Color
+                   ? design_lowpass(0.6e6, cfg.sample_rate, 31)
+                   : std::vector<float>{1.0f}) {
     pll_.init(nominal_period_);
     if (cfg.input == Config::Input::BasebandF32 &&
         cfg.baseband_agc == Config::AgcMode::Fixed)
@@ -66,8 +71,9 @@ void NtscDecoder::process(const float* raw, size_t n) {
         for (size_t i = 0; i < n; ++i) tmp[i] = agc_.to_ire(raw[i]);
         std::fwrite(tmp.data(), sizeof(float), n, dump_fp_);
     }
-    chromab_.resize(old + n);
-    chroma_bpf_.process(comp_.data() + old, chromab_.data() + old, n);
+    chromab_.resize(old + n, 0.0f);
+    if (cfg_.mode == Config::Mode::Color)
+        chroma_bpf_.process(comp_.data() + old, chromab_.data() + old, n);
 
     stats_.samples_in.store(static_cast<uint64_t>(comp_end()),
                             std::memory_order_relaxed);
@@ -284,10 +290,15 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
 
 void NtscDecoder::decode_row(double edge) {
     Frame& f = tb_.back();
-    int row = (line_no_ - cfg_.timing.active_start_line) * 2;
-    if (row < 0 || row + 1 >= Frame::kHeight) return;
-    uint32_t* out0 = f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
-    uint32_t* out1 = out0 + Frame::kWidth;
+    int active_row = line_no_ - cfg_.timing.active_start_line;
+    int row_begin = active_row * Frame::kHeight / cfg_.timing.active_lines;
+    int row_end = (active_row + 1) * Frame::kHeight /
+                  cfg_.timing.active_lines;
+    if (row_begin < 0 || row_begin >= Frame::kHeight || row_end <= row_begin)
+        return;
+    row_end = std::min(row_end, Frame::kHeight);
+    uint32_t* out0 =
+        f.rgba.data() + static_cast<size_t>(row_begin) * Frame::kWidth;
 
     const double full_start =
         edge + cfg_.timing.active_start_us * samples_per_us_;
@@ -371,18 +382,23 @@ void NtscDecoder::decode_row(double edge) {
             };
             uint32_t px32 = 0xff000000u | (q(b) << 16) | (q(g) << 8) | q(r);
             out0[px] = px32;
-            out1[px] = px32;
         }
     } else {
         for (int px = 0; px < Frame::kWidth; ++px) {
             double p = active_start + px * step;
-            float y = ire_frac(p) - chroma_frac(p);
+            // Monochrome profiles consume raw normalized luminance directly;
+            // no NTSC chroma band-pass or Y/C subtraction is run.
+            float y = ire_frac(p);
             uint32_t g = static_cast<uint32_t>(
                 std::clamp(y / 100.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
             uint32_t px32 = 0xff000000u | (g << 16) | (g << 8) | g;
             out0[px] = px32;
-            out1[px] = px32;
         }
+    }
+    for (int row = row_begin + 1; row < row_end; ++row) {
+        uint32_t* dst =
+            f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
+        std::copy_n(out0, Frame::kWidth, dst);
     }
 }
 
