@@ -94,7 +94,23 @@ platform-specific dependencies beyond libhackrf and SDL2.
 
 # Headless: dump decoded frames as PPM (debug / verification)
 ./build/famidec --input file --file cap.cs8 --dump-frames out_ --frames 30
+
+# Decode an already-detected composite waveform (sample rate is mandatory)
+./build/famidec --input baseband-f32 --file composite.f32 --rate 10e6 \
+  --mode gray --dump-frames out_ --frames 1
 ```
+
+`baseband-f32` consumes a headerless stream of little-endian IEEE-754 float32
+samples, one detected-composite sample per time step. It bypasses all RF/IQ
+DC blocking, tuning, channel filtering, AM/FM detection, spectrum, and IQ
+recording stages. The raw convention is negative modulation: sync is higher
+than blanking. Files must be nonempty, exactly divisible into four-byte
+samples, and contain no NaN or infinity.
+
+The default `--agc auto` estimates sync and blanking. For a known waveform,
+`--agc fixed --sync-level S --blank-level B` uses post-transform levels and
+requires `S > B`. Input transforms are applied in this order: optional
+polarity inversion, `--baseband-gain`, then `--baseband-offset`.
 
 ### Options
 
@@ -102,8 +118,8 @@ platform-specific dependencies beyond libhackrf and SDL2.
 |---|---|
 | `--channel 1\|2` | Japan VHF channel preset (default 1) |
 | `--freq HZ` | explicit video carrier frequency |
-| `--input hackrf\|file` | input source (default hackrf) |
-| `--file PATH` / `--loop` | .cs8 playback / loop |
+| `--input hackrf\|file\|baseband-f32` | input source (default hackrf) |
+| `--file PATH` / `--loop` | .cs8 IQ or little-endian f32 baseband playback / loop |
 | `--rate HZ` / `--offset HZ` | sample rate (default 10e6) / tuning offset (default 2e6) |
 | `--lna N` / `--vga N` / `--amp` | LNA 0-40 (default 24) / VGA 0-62 (default 20) / RF amp |
 | `--mode color\|gray` | color / grayscale (default color) |
@@ -115,6 +131,10 @@ platform-specific dependencies beyond libhackrf and SDL2.
 | `--record PATH` | tee raw IQ to .cs8 while decoding |
 | `--dump-frames PREFIX` / `--frames N` | headless PPM frame dump |
 | `--dump-composite PATH` | dump post-AGC composite as f32 (debug) |
+| `--baseband-polarity normal\|inverted` | baseband polarity before gain/offset |
+| `--baseband-gain F` / `--baseband-offset F` | baseband affine transform (defaults 1 / 0) |
+| `--agc auto\|fixed` | baseband level estimation (default auto) |
+| `--sync-level F` / `--blank-level F` | fixed post-transform levels; sync must be greater |
 | `--spectrum` | print PSD and exit (no video) |
 
 ### Keys / on-screen display
@@ -157,6 +177,9 @@ HackRF One (10 MSPS, tuned video carrier +2 MHz)
   → triple buffer → SDL2 display
 audio tap (pre-LPF) → −4.5 MHz mix → ÷25 decimating FIR (400 kHz)
   → FM discriminator → 75 µs de-emphasis → ÷8 → 50 kHz → SDL audio
+
+little-endian f32 detected composite
+  → polarity / gain / offset → AGC (auto or fixed) → sync/Y-C/RGB path above
 ```
 
 The Famicom is not broadcast-compliant (non-interlaced 240p, chroma phase
@@ -176,13 +199,16 @@ headroom at 10 MSPS on Apple Silicon.
 ```sh
 ./build/synth_ntsc            # synthesize color bars → decode → assert RGB
 ./build/synth_ntsc bars.cs8   # write synthetic IQ as .cs8 (for E2E tests)
+./build/baseband_source_test  # validate f32 format, transforms, loop, failures
 ctest --test-dir build
 ```
 
 Linux CI installs the HackRF and SDL2 development libraries, builds the full
 RF/IQ application and every test target, runs CTest, and invokes the synthetic
-NTSC regression directly. Future baseband tests added to CTest therefore join
-the same required path without weakening the existing RF/IQ build.
+NTSC regression directly. The `baseband_e2e` CTest generates a temporary
+six-field grayscale waveform independently of the decoder, invokes the real
+CLI, validates five exact output bars, checks invalid CLI combinations, and
+removes the generated f32/PPM files after success.
 
 ### Deterministic fixture policy
 
