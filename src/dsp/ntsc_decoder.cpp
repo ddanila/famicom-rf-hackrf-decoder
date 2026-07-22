@@ -205,9 +205,10 @@ void NtscDecoder::freerun_line(int64_t start) {
     }
 }
 
-void NtscDecoder::publish_frame(int64_t sample_pos) {
+void NtscDecoder::publish_frame(int64_t sample_pos, bool frame_locked) {
     tb_.publish(++frame_seq_);
     stats_.frames.fetch_add(1, std::memory_order_relaxed);
+    stats_.frame_locked.store(frame_locked, std::memory_order_relaxed);
     uint64_t position = static_cast<uint64_t>(sample_pos);
     uint64_t previous =
         stats_.frame_sample_pos.exchange(position, std::memory_order_relaxed);
@@ -244,7 +245,7 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         // untouched initial back buffer as a spurious black frame.
         if (line_no_ >=
             cfg_.timing.active_start_line + cfg_.timing.active_lines) {
-            publish_frame(e);
+            publish_frame(e, true);
         }
         line_no_ = 0;
     } else {
@@ -256,7 +257,7 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         // publish black frames instead of falling back to snow.
         if (line_no_ >= cfg_.timing.lines_per_frame) {
             if (pll_.locked) {
-                publish_frame(e);
+                publish_frame(e, false);
             }
             line_no_ -= cfg_.timing.lines_per_frame;
         }

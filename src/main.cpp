@@ -521,6 +521,7 @@ bool write_stats_json(const Config& cfg, const NtscDecoder& dec,
         "  \"schema_version\": 1,\n"
         "  \"timing_policy\": \"%s\",\n"
         "  \"line_locked\": %s,\n"
+        "  \"frame_locked\": %s,\n"
         "  \"frames\": %llu,\n"
         "  \"lines\": %llu,\n"
         "  \"coasted_lines\": %llu,\n"
@@ -533,6 +534,7 @@ bool write_stats_json(const Config& cfg, const NtscDecoder& dec,
         "}\n",
         cfg.custom_timing ? "custom" : "ntsc",
         stats.line_locked.load(std::memory_order_relaxed) ? "true" : "false",
+        stats.frame_locked.load(std::memory_order_relaxed) ? "true" : "false",
         static_cast<unsigned long long>(
             stats.frames.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
@@ -996,6 +998,11 @@ int main(int argc, char** argv) {
         !write_stats_json(cfg, dec, cfg.stats_json_path)) {
         std::fprintf(stderr, "cannot write receiver stats %s\n",
                      cfg.stats_json_path.c_str());
+        rc = 1;
+    }
+    if (cfg.custom_timing && cfg.headless &&
+        !dec.stats().frame_locked.load(std::memory_order_relaxed)) {
+        std::fprintf(stderr, "custom timing input did not achieve frame lock\n");
         rc = 1;
     }
     if (g_input_error.load(std::memory_order_relaxed)) rc = 1;

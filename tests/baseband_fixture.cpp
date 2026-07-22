@@ -35,10 +35,21 @@ constexpr FixtureTiming kCustomTiming = {
     8e6, 80.0, 200, 4, 10, 180, 6.0, 12.0, 60.0, 6,
 };
 
-float composite_ire(const FixtureTiming& timing, int line, double us) {
-    if (line < timing.vsync_lines)
+enum class Impairment {
+    None,
+    ReversedPolarity,
+    MissingHsync,
+    MalformedVsync,
+    ClippedSync,
+};
+
+float composite_ire(const FixtureTiming& timing, Impairment impairment,
+                    int line, double us) {
+    if (line < timing.vsync_lines &&
+        impairment != Impairment::MalformedVsync)
         return us > timing.line_us - timing.hsync_us ? 0.0f : -40.0f;
-    if (us < timing.hsync_us) return -40.0f;
+    if (us < timing.hsync_us && impairment != Impairment::MissingHsync)
+        return -40.0f;
     if (us < timing.active_start_us ||
         us >= timing.active_start_us + timing.active_width_us)
         return 0.0f;
@@ -52,7 +63,8 @@ float composite_ire(const FixtureTiming& timing, int line, double us) {
     return kBars[static_cast<size_t>(bar)];
 }
 
-bool generate(const std::string& path, const FixtureTiming& timing) {
+bool generate(const std::string& path, const FixtureTiming& timing,
+              Impairment impairment = Impairment::None) {
     std::ofstream out(path, std::ios::binary);
     if (!out) return false;
 
@@ -83,10 +95,13 @@ bool generate(const std::string& path, const FixtureTiming& timing) {
         int line = static_cast<int>(in_field / samples_per_line);
         double us = std::fmod(in_field, samples_per_line) /
                     timing.sample_rate * 1e6;
-        float ire = composite_ire(timing, line, us);
+        float ire = composite_ire(timing, impairment, line, us);
         // Negative modulation convention used by NtscDecoder's raw input:
         // sync tip=1.0, blank=0.75, white=0.125.
-        append_f32le(0.75f - ire * 0.00625f);
+        float raw = 0.75f - ire * 0.00625f;
+        if (impairment == Impairment::ReversedPolarity) raw = -raw;
+        if (impairment == Impairment::ClippedSync) raw = std::min(raw, 0.8f);
+        append_f32le(raw);
     }
     if (buffered != 0) flush();
     if (!out) return false;
@@ -139,13 +154,30 @@ int main(int argc, char** argv) {
     if (argc != 3) {
         std::fprintf(
             stderr,
-            "usage: baseband_fixture generate|generate-custom|validate PATH\n");
+            "usage: baseband_fixture generate|generate-custom|generate-*|validate PATH\n");
         return 2;
     }
     std::string mode = argv[1];
     if (mode == "generate") return generate(argv[2], kNtscTiming) ? 0 : 1;
     if (mode == "generate-custom")
         return generate(argv[2], kCustomTiming) ? 0 : 1;
+    if (mode == "generate-reversed")
+        return generate(argv[2], kCustomTiming,
+                        Impairment::ReversedPolarity) ? 0 : 1;
+    if (mode == "generate-missing-hsync")
+        return generate(argv[2], kCustomTiming,
+                        Impairment::MissingHsync) ? 0 : 1;
+    if (mode == "generate-malformed-vsync")
+        return generate(argv[2], kCustomTiming,
+                        Impairment::MalformedVsync) ? 0 : 1;
+    if (mode == "generate-clipped")
+        return generate(argv[2], kCustomTiming,
+                        Impairment::ClippedSync) ? 0 : 1;
+    if (mode == "generate-period-error") {
+        FixtureTiming wrong_period = kCustomTiming;
+        wrong_period.line_us = 90.0;
+        return generate(argv[2], wrong_period) ? 0 : 1;
+    }
     if (mode == "validate") return validate(argv[2]) ? 0 : 1;
     std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
     return 2;

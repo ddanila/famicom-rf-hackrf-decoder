@@ -20,6 +20,7 @@ public:
 
     struct Stats {
         std::atomic<bool> line_locked{false};
+        std::atomic<bool> frame_locked{false};
         std::atomic<float> burst_amp{0.0f};
         std::atomic<uint64_t> frames{0};
         std::atomic<uint64_t> lines{0};
@@ -56,7 +57,7 @@ private:
                          int64_t* pulse_end = nullptr) const;
     void handle_line(double edge, bool edge_measured);
     void decode_row(double edge);
-    void publish_frame(int64_t sample_pos);
+    void publish_frame(int64_t sample_pos, bool frame_locked);
     void trim_buffers();
 
     // comp_/chromab_ hold the RAW detected envelope (and its bandpass);
