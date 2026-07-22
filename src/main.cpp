@@ -72,6 +72,7 @@ void usage() {
         "  --agc-porch-start-us F --agc-porch-end-us F\n"
         "  --dump-frames PREFIX  write decoded frames as PPM (headless)\n"
         "  --frames N            number of frames for --dump-frames (default 30)\n"
+        "  --stats-json PATH     write measured receiver statistics\n"
         "  --spectrum            print PSD and exit (no video)\n"
         "\nkeys: q/ESC quit, l/L LNA +/-, g/G VGA +/-, c color toggle, s screenshot\n");
 }
@@ -367,6 +368,8 @@ bool parse_args(int argc, char** argv, Config* cfg) {
                                     &cfg->timing.agc_back_porch_end_us))
                 return false;
             timing_fields |= kAgcPorchEndField;
+        } else if (a == "--stats-json") {
+            cfg->stats_json_path = next("--stats-json");
         } else if (a == "--record") cfg->record_path = next("--record");
         else if (a == "--dump-composite") cfg->dump_composite_path = next("--dump-composite");
         else if (a == "--dump-frames") { cfg->dump_frames_prefix = next("--dump-frames"); cfg->headless = true; }
@@ -473,6 +476,7 @@ bool parse_args(int argc, char** argv, Config* cfg) {
                          "custom timing values are inconsistent or out of range\n");
             return false;
         }
+        cfg->custom_timing = true;
     }
     if (cfg->headless && cfg->dump_frame_count <= 0) cfg->dump_frame_count = 30;
     return true;
@@ -492,6 +496,54 @@ bool write_ppm(const Frame& f, const std::string& path) {
             break;
         }
     }
+    if (std::fclose(fp) != 0) ok = false;
+    return ok;
+}
+
+bool write_stats_json(const Config& cfg, const NtscDecoder& dec,
+                      const std::string& path) {
+    std::FILE* fp = std::fopen(path.c_str(), "wb");
+    if (!fp) return false;
+    const auto& stats = dec.stats();
+    double line_period = stats.line_period.load(std::memory_order_relaxed);
+    uint64_t frame_period =
+        stats.frame_period_samples.load(std::memory_order_relaxed);
+    double line_rate = line_period > 0.0 ? cfg.sample_rate / line_period : 0.0;
+    double frame_rate =
+        frame_period > 0 ? cfg.sample_rate / static_cast<double>(frame_period)
+                         : 0.0;
+    double sync_width_us =
+        stats.sync_width_samples.load(std::memory_order_relaxed) /
+        cfg.sample_rate * 1e6;
+    int written = std::fprintf(
+        fp,
+        "{\n"
+        "  \"schema_version\": 1,\n"
+        "  \"timing_policy\": \"%s\",\n"
+        "  \"line_locked\": %s,\n"
+        "  \"frames\": %llu,\n"
+        "  \"lines\": %llu,\n"
+        "  \"coasted_lines\": %llu,\n"
+        "  \"measured_line_rate_hz\": %.6f,\n"
+        "  \"measured_frame_rate_hz\": %.6f,\n"
+        "  \"measured_sync_width_us\": %.6f,\n"
+        "  \"measured_blank_ire\": %.6f,\n"
+        "  \"measured_video_min_ire\": %.6f,\n"
+        "  \"measured_video_max_ire\": %.6f\n"
+        "}\n",
+        cfg.custom_timing ? "custom" : "ntsc",
+        stats.line_locked.load(std::memory_order_relaxed) ? "true" : "false",
+        static_cast<unsigned long long>(
+            stats.frames.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            stats.lines.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            stats.lines_coasted.load(std::memory_order_relaxed)),
+        line_rate, frame_rate, sync_width_us,
+        stats.blank_ire.load(std::memory_order_relaxed),
+        stats.video_min_ire.load(std::memory_order_relaxed),
+        stats.video_max_ire.load(std::memory_order_relaxed));
+    bool ok = written > 0;
     if (std::fclose(fp) != 0) ok = false;
     return ok;
 }
@@ -940,6 +992,12 @@ int main(int argc, char** argv) {
     if (rec.stop(&rec_path, &rec_bytes))
         std::printf("saved %s (%.1f MB) - replay: famidec --input file --file %s\n",
                     rec_path.c_str(), rec_bytes / 1e6, rec_path.c_str());
+    if (!cfg.stats_json_path.empty() &&
+        !write_stats_json(cfg, dec, cfg.stats_json_path)) {
+        std::fprintf(stderr, "cannot write receiver stats %s\n",
+                     cfg.stats_json_path.c_str());
+        rc = 1;
+    }
     if (g_input_error.load(std::memory_order_relaxed)) rc = 1;
     return rc;
 }

@@ -205,6 +205,17 @@ void NtscDecoder::freerun_line(int64_t start) {
     }
 }
 
+void NtscDecoder::publish_frame(int64_t sample_pos) {
+    tb_.publish(++frame_seq_);
+    stats_.frames.fetch_add(1, std::memory_order_relaxed);
+    uint64_t position = static_cast<uint64_t>(sample_pos);
+    uint64_t previous =
+        stats_.frame_sample_pos.exchange(position, std::memory_order_relaxed);
+    if (previous != 0 && position > previous)
+        stats_.frame_period_samples.store(position - previous,
+                                          std::memory_order_relaxed);
+}
+
 void NtscDecoder::handle_line(double edge, bool edge_measured) {
     int64_t e = static_cast<int64_t>(std::llround(edge));
     int64_t period_i = static_cast<int64_t>(pll_.period);
@@ -219,6 +230,11 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         asserted > static_cast<int64_t>(cfg_.timing.vsync_asserted_fraction *
                                         static_cast<double>(period_i));
 
+    if (edge_measured && pulse_end_ > pulse_begin_)
+        stats_.sync_width_samples.store(
+            static_cast<float>(pulse_end_ - pulse_begin_),
+            std::memory_order_relaxed);
+
     if (is_vsync_line) {
         ++vsync_run_;
         return;
@@ -228,10 +244,7 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         // untouched initial back buffer as a spurious black frame.
         if (line_no_ >=
             cfg_.timing.active_start_line + cfg_.timing.active_lines) {
-            tb_.publish(++frame_seq_);
-            stats_.frames.fetch_add(1, std::memory_order_relaxed);
-            stats_.frame_sample_pos.store(static_cast<uint64_t>(e),
-                                          std::memory_order_relaxed);
+            publish_frame(e);
         }
         line_no_ = 0;
     } else {
@@ -243,10 +256,7 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         // publish black frames instead of falling back to snow.
         if (line_no_ >= cfg_.timing.lines_per_frame) {
             if (pll_.locked) {
-                tb_.publish(++frame_seq_);
-                stats_.frames.fetch_add(1, std::memory_order_relaxed);
-                stats_.frame_sample_pos.store(static_cast<uint64_t>(e),
-                                              std::memory_order_relaxed);
+                publish_frame(e);
             }
             line_no_ -= cfg_.timing.lines_per_frame;
         }
@@ -255,8 +265,7 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
 
     // AGC refinement: sync tip over the pulse, blanking from the back porch
     // after the burst (8.2..9.2 us).
-    if (cfg_.baseband_agc == Config::AgcMode::Auto && edge_measured &&
-        pulse_end_ > pulse_begin_) {
+    if (edge_measured && pulse_end_ > pulse_begin_) {
         // Average over the middle half of the slicer-asserted pulse extent.
         // Fixed offsets from the edge estimate drift onto the filter-ringing
         // overshoot as AGC scale errors bias the threshold crossing, which
@@ -278,7 +287,9 @@ void NtscDecoder::handle_line(double edge, bool edge_measured) {
         for (int64_t j = blank_begin; j < blank_end; ++j, ++n)
             blank += ire(j);
         blank /= static_cast<float>(n);
-        agc_.update_from_ire(tip, blank);
+        stats_.blank_ire.store(blank, std::memory_order_relaxed);
+        if (cfg_.baseband_agc == Config::AgcMode::Auto)
+            agc_.update_from_ire(tip, blank);
     }
 
     if (line_no_ >= cfg_.timing.active_start_line &&
@@ -310,6 +321,8 @@ void NtscDecoder::decode_row(double edge) {
     const double active_span = full_span - 2.0 * crop;
     const double step = active_span / Frame::kWidth;
     const bool color = cfg_.mode == Config::Mode::Color;
+    float line_min = 1e30f;
+    float line_max = -1e30f;
 
     // Burst: ~9+ cycles starting 5.3 us after the edge; gate 3.2 us.
     BurstMeasurement burst;
@@ -365,6 +378,8 @@ void NtscDecoder::decode_row(double edge) {
         for (int px = 0; px < Frame::kWidth; ++px) {
             double p = active_start + px * step;
             float y = ire_frac(p) - chroma_frac(p);
+            line_min = std::min(line_min, y);
+            line_max = std::max(line_max, y);
             // filtered UV value centered at abs pos p
             int64_t idx = static_cast<int64_t>(p) - a0 + uv_delay_;
             float u = 0.0f, v = 0.0f;
@@ -389,6 +404,8 @@ void NtscDecoder::decode_row(double edge) {
             // Monochrome profiles consume raw normalized luminance directly;
             // no NTSC chroma band-pass or Y/C subtraction is run.
             float y = ire_frac(p);
+            line_min = std::min(line_min, y);
+            line_max = std::max(line_max, y);
             uint32_t g = static_cast<uint32_t>(
                 std::clamp(y / 100.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
             uint32_t px32 = 0xff000000u | (g << 16) | (g << 8) | g;
@@ -400,6 +417,8 @@ void NtscDecoder::decode_row(double edge) {
             f.rgba.data() + static_cast<size_t>(row) * Frame::kWidth;
         std::copy_n(out0, Frame::kWidth, dst);
     }
+    stats_.video_min_ire.store(line_min, std::memory_order_relaxed);
+    stats_.video_max_ire.store(line_max, std::memory_order_relaxed);
 }
 
 void NtscDecoder::trim_buffers() {

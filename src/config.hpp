@@ -43,6 +43,8 @@ struct Config {
     bool headless = false;            // decode without SDL window (dump frames)
     std::string dump_frames_prefix;   // write decoded frames as PPM
     int dump_frame_count = 0;
+    std::string stats_json_path;      // final measured receiver statistics
+    bool custom_timing = false;
 
     VideoTimingProfile timing;
 

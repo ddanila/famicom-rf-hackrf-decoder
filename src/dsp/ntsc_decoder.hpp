@@ -25,6 +25,11 @@ public:
         std::atomic<uint64_t> lines{0};
         std::atomic<uint64_t> lines_coasted{0};
         std::atomic<float> line_period{0.0f};
+        std::atomic<float> sync_width_samples{0.0f};
+        std::atomic<float> blank_ire{0.0f};
+        std::atomic<float> video_min_ire{0.0f};
+        std::atomic<float> video_max_ire{0.0f};
+        std::atomic<uint64_t> frame_period_samples{0};
         // Absolute input-sample index of the most recently published
         // frame's vsync, and total samples fed into the decoder — both in
         // the same coordinate system (for latency estimation that stays
@@ -51,6 +56,7 @@ private:
                          int64_t* pulse_end = nullptr) const;
     void handle_line(double edge, bool edge_measured);
     void decode_row(double edge);
+    void publish_frame(int64_t sample_pos);
     void trim_buffers();
 
     // comp_/chromab_ hold the RAW detected envelope (and its bandpass);
